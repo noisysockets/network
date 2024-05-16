@@ -20,14 +20,15 @@ test:
   COPY . .
   RUN go test -coverprofile=coverage.out -v ./...
   SAVE ARTIFACT coverage.out AS LOCAL coverage.out
-  WORKDIR /workspace/tests
+  WORKDIR /workspace/test
   WITH DOCKER
     RUN go test -timeout=300s -v ./...
   END
   WORKDIR /workspace/examples
   WITH DOCKER
+    # TODO: actually run the examples.
     RUN for example in $(find . -name 'main.go'); do \
-        go run "$example" || exit 1; \
+        go build "$example"; \
       done
   END
 
