@@ -24,7 +24,7 @@ type pipeEndpoint struct {
 }
 
 // Pipe creates a pair of connected interfaces that can be used to simulate a
-// network connection.
+// network connection. This is similar to a linux veth device.
 func Pipe(mtu, batchSize int) (Interface, Interface) {
 	ctx, cancel := context.WithCancel(context.Background())
 

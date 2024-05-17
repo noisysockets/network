@@ -43,6 +43,7 @@ import (
 
 	stdnet "net"
 
+	"github.com/noisysockets/getresolvd"
 	"github.com/noisysockets/netstack/pkg/buffer"
 	"github.com/noisysockets/netstack/pkg/tcpip"
 	"github.com/noisysockets/netstack/pkg/tcpip/adapters/gonet"
@@ -89,7 +90,7 @@ type UserspaceNetwork struct {
 	nic          Interface
 	nicID        tcpip.NICID
 	hostname     string
-	resolver     *Resolver
+	resolver     *getresolvd.Resolver
 	stack        *stack.Stack
 	ep           *channel.Endpoint
 	notifyHandle *channel.NotificationHandle
@@ -140,7 +141,8 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, opts *Us
 
 	net.notifyHandle = net.ep.AddNotify(net)
 
-	net.resolver = &Resolver{
+	net.resolver = &getresolvd.Resolver{
+		Protocol:    getresolvd.ProtocolUDP,
 		Servers:     opts.Nameservers,
 		Rotate:      true,
 		Timeout:     5 * time.Second,

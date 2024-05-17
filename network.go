@@ -20,7 +20,6 @@ import (
 var (
 	ErrInvalidPort           = errors.New("invalid port")
 	ErrMissingAddress        = errors.New("missing address")
-	ErrNoSuchHost            = errors.New("no such host")
 	ErrNoSuitableAddress     = errors.New("no suitable address found")
 	ErrUnexpectedAddressType = errors.New("unexpected address type")
 )
