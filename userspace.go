@@ -43,7 +43,6 @@ import (
 
 	stdnet "net"
 
-	"github.com/noisysockets/getresolvd"
 	"github.com/noisysockets/netstack/pkg/buffer"
 	"github.com/noisysockets/netstack/pkg/tcpip"
 	"github.com/noisysockets/netstack/pkg/tcpip/adapters/gonet"
@@ -56,6 +55,7 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/icmp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
+	"github.com/noisysockets/resolver"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -90,7 +90,7 @@ type UserspaceNetwork struct {
 	nic          Interface
 	nicID        tcpip.NICID
 	hostname     string
-	resolver     *getresolvd.Resolver
+	resolver     resolver.Resolver
 	stack        *stack.Stack
 	ep           *channel.Endpoint
 	notifyHandle *channel.NotificationHandle
@@ -141,13 +141,13 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, opts *Us
 
 	net.notifyHandle = net.ep.AddNotify(net)
 
-	net.resolver = &getresolvd.Resolver{
-		Protocol:    getresolvd.ProtocolUDP,
+	net.resolver = resolver.DNS(&resolver.DNSResolverConfig{
+		Protocol:    resolver.ProtocolUDP,
 		Servers:     opts.Nameservers,
 		Rotate:      true,
 		Timeout:     5 * time.Second,
 		DialContext: net.DialContext,
-	}
+	})
 
 	var ep stack.LinkEndpoint = net.ep
 	if opts.PacketCapturePath != "" {

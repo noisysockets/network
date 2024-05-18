@@ -3,8 +3,8 @@ module github.com/noisysockets/network
 go 1.22.0
 
 require (
-	github.com/noisysockets/getresolvd v0.1.0
 	github.com/noisysockets/netstack v0.6.0
+	github.com/noisysockets/resolver v0.2.0
 	golang.org/x/sync v0.7.0
 	golang.org/x/sys v0.20.0
 )
@@ -12,6 +12,7 @@ require (
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/google/btree v1.1.2 // indirect
+	github.com/kevinburke/hostsfile v0.0.0-20220522040509-e5e984885321 // indirect
 	github.com/miekg/dns v1.1.59 // indirect
 	golang.org/x/mod v0.17.0 // indirect
 	golang.org/x/net v0.25.0 // indirect

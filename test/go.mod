@@ -14,9 +14,10 @@ require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/btree v1.1.2 // indirect
+	github.com/kevinburke/hostsfile v0.0.0-20220522040509-e5e984885321 // indirect
 	github.com/miekg/dns v1.1.59 // indirect
-	github.com/noisysockets/getresolvd v0.1.0 // indirect
 	github.com/noisysockets/netstack v0.6.0 // indirect
+	github.com/noisysockets/resolver v0.2.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/mod v0.17.0 // indirect
 	golang.org/x/net v0.25.0 // indirect
