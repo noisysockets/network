@@ -35,6 +35,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -60,7 +61,9 @@ import (
 )
 
 const (
-	outboundQueueSize = 256
+	nicID                            = 1
+	outboundQueueSize                = 256
+	maxInFlightTCPConnectionAttempts = 16
 )
 
 var (
@@ -68,27 +71,36 @@ var (
 	_ Network = (*UserspaceNetwork)(nil)
 )
 
-type UserspaceNetworkOptions struct {
+type UserspaceNetworkConfig struct {
 	// Hostname is the hostname of the local process.
 	Hostname string
 	// Addresses is a list of IP addresses/IP prefixes to add.
 	Addresses []netip.Prefix
-	// HandleLocal indicates whether packets destined to their source
-	// should be handled by the stack internally (true) or outside the
-	// stack (false).
-	HandleLocal bool
-	// Nameservers is a list of nameservers to use for DNS resolution.
-	Nameservers []netip.AddrPort
-	// PacketCapturePath is a path to write a packet capture file to.
-	// If empty, no packet capture file will be written.
-	// This is useful for debugging.
-	PacketCapturePath string
+	// ResolverFactory is an optional factory to create a DNS resolver.
+	ResolverFactory ResolverFactory
+	// EnableSpoofing allows outgoing packets to have a source address different
+	// from the address assigned to the NIC.
+	EnableSpoofing bool
+	// EnablePromiscuousMode allows incoming packets to have a destination address
+	// different from the address assigned to the NIC.
+	EnablePromiscuousMode bool
+	// DisableIPv4 disables IPv4 support.
+	DisableIPv4 bool
+	// DisableIPv6 disables IPv6 support.
+	DisableIPv6 bool
+	// TCPProtocolHandler is a callback that is invoked when a TCP packet is received.
+	TCPProtocolHandler func(*tcp.ForwarderRequest)
+	// UDPProtocolHandler is a callback that is invoked when a UDP packet is received.
+	UDPProtocolHandler func(*udp.ForwarderRequest)
+	// PacketCaptureWriter is an optional writer to write a packet capture file to.
+	// If nil, no packet capture file will be written.
+	// This is useful for debugging network issues.
+	PacketCaptureWriter io.Writer
 }
 
 type UserspaceNetwork struct {
 	logger       *slog.Logger
 	nic          Interface
-	nicID        tcpip.NICID
 	hostname     string
 	resolver     resolver.Resolver
 	stack        *stack.Stack
@@ -98,29 +110,29 @@ type UserspaceNetwork struct {
 	tasks        *errgroup.Group
 	tasksCtx     context.Context
 	tasksCancel  context.CancelFunc
-	// pcapFile is an optional file to write a packet capture to.
-	pcapFile *os.File
 }
 
 // Userspace returns a userspace Network implementation based on Netstack from
 // the gVisor project.
-func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, opts *UserspaceNetworkOptions) (*UserspaceNetwork, error) {
-	if opts == nil {
-		opts = &UserspaceNetworkOptions{}
+func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *UserspaceNetworkConfig) (*UserspaceNetwork, error) {
+	if conf == nil {
+		conf = &UserspaceNetworkConfig{}
 	}
 
 	stackOpts := stack.Options{
-		NetworkProtocols: []stack.NetworkProtocolFactory{
-			ipv4.NewProtocol,
-			ipv6.NewProtocol,
-		},
 		TransportProtocols: []stack.TransportProtocolFactory{
 			tcp.NewProtocol,
 			udp.NewProtocol,
 			icmp.NewProtocol4,
 			icmp.NewProtocol6,
 		},
-		HandleLocal: opts.HandleLocal,
+	}
+
+	if !conf.DisableIPv4 {
+		stackOpts.NetworkProtocols = append(stackOpts.NetworkProtocols, ipv4.NewProtocol)
+	}
+	if !conf.DisableIPv6 {
+		stackOpts.NetworkProtocols = append(stackOpts.NetworkProtocols, ipv6.NewProtocol)
 	}
 
 	tasksCtx, tasksCancel := context.WithCancel(ctx)
@@ -129,8 +141,8 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, opts *Us
 	net := &UserspaceNetwork{
 		logger:      logger,
 		nic:         nic,
-		nicID:       1,
-		hostname:    opts.Hostname,
+		hostname:    conf.Hostname,
+		resolver:    resolver.IP(),
 		stack:       stack.New(stackOpts),
 		ep:          channel.New(outboundQueueSize, uint32(nic.MTU()), ""),
 		outbound:    make(chan *stack.PacketBuffer),
@@ -141,23 +153,13 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, opts *Us
 
 	net.notifyHandle = net.ep.AddNotify(net)
 
-	net.resolver = resolver.DNS(&resolver.DNSResolverConfig{
-		Protocol:    resolver.ProtocolUDP,
-		Servers:     opts.Nameservers,
-		Rotate:      true,
-		Timeout:     5 * time.Second,
-		DialContext: net.DialContext,
-	})
+	if conf.ResolverFactory != nil {
+		net.resolver = conf.ResolverFactory(net.DialContext)
+	}
 
 	var ep stack.LinkEndpoint = net.ep
-	if opts.PacketCapturePath != "" {
-		var err error
-		net.pcapFile, err = os.OpenFile(opts.PacketCapturePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open pcap file: %v", err)
-		}
-
-		if snifferEP, err := sniffer.NewWithWriter(ep, net.pcapFile, uint32(nic.MTU())); err != nil {
+	if conf.PacketCaptureWriter != nil {
+		if snifferEP, err := sniffer.NewWithWriter(ep, conf.PacketCaptureWriter, uint32(nic.MTU())); err != nil {
 			_ = net.Close()
 			return nil, fmt.Errorf("failed to create pcap sniffer: %v", err)
 		} else {
@@ -165,18 +167,27 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, opts *Us
 		}
 	}
 
-	if err := net.stack.CreateNIC(net.nicID, ep); err != nil {
+	// Create a primary NIC.
+	if err := net.stack.CreateNIC(nicID, ep); err != nil {
 		_ = net.Close()
 		return nil, fmt.Errorf("failed to create NIC: %v", err)
 	}
 
 	// Assign addresses to the NIC.
-	for _, addr := range opts.Addresses {
+	for _, addr := range conf.Addresses {
 		var pn tcpip.NetworkProtocolNumber
 		if addr.Addr().Is4() {
 			pn = ipv4.ProtocolNumber
 		} else if addr.Addr().Is6() {
 			pn = ipv6.ProtocolNumber
+		}
+
+		// Ignore the address if the protocol is disabled.
+		if conf.DisableIPv4 && pn == ipv4.ProtocolNumber {
+			continue
+		}
+		if conf.DisableIPv6 && pn == ipv6.ProtocolNumber {
+			continue
 		}
 
 		protocolAddress := tcpip.ProtocolAddress{
@@ -187,20 +198,47 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, opts *Us
 			},
 		}
 
-		if err := net.stack.AddProtocolAddress(net.nicID, protocolAddress, stack.AddressProperties{}); err != nil {
+		if err := net.stack.AddProtocolAddress(nicID, protocolAddress, stack.AddressProperties{}); err != nil {
 			return nil, fmt.Errorf("could not add address: %v", err)
 		}
 	}
 
 	// Route all outbound packets to the NIC.
-	net.stack.AddRoute(tcpip.Route{
-		Destination: header.IPv4EmptySubnet,
-		NIC:         net.nicID,
-	})
-	net.stack.AddRoute(tcpip.Route{
-		Destination: header.IPv6EmptySubnet,
-		NIC:         net.nicID,
-	})
+	if !conf.DisableIPv4 {
+		net.stack.AddRoute(tcpip.Route{
+			Destination: header.IPv4EmptySubnet,
+			NIC:         nicID,
+		})
+	}
+	if !conf.DisableIPv6 {
+		net.stack.AddRoute(tcpip.Route{
+			Destination: header.IPv6EmptySubnet,
+			NIC:         nicID,
+		})
+	}
+
+	// Allow outgoing packets to have a source address different from the address
+	// assigned to the NIC.
+	if err := net.stack.SetSpoofing(nicID, conf.EnableSpoofing); err != nil {
+		return nil, fmt.Errorf("failed to configure spoofing: %v", err)
+	}
+
+	// Allows outgoing packets to have a destination address different from the
+	// address assigned to the NIC.
+	if err := net.stack.SetPromiscuousMode(nicID, conf.EnablePromiscuousMode); err != nil {
+		return nil, fmt.Errorf("failed to configure promiscuous mode: %v", err)
+	}
+
+	// Register custom protocol handlers (if any).
+	if conf.TCPProtocolHandler != nil {
+		tcpFwd := tcp.NewForwarder(net.stack, 0, maxInFlightTCPConnectionAttempts, conf.TCPProtocolHandler)
+		net.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
+	}
+
+	if conf.UDPProtocolHandler != nil {
+		udpFwd := udp.NewForwarder(net.stack, conf.UDPProtocolHandler)
+		net.stack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
+	}
 
 	// Begin copying packets to/from the NIC.
 	net.tasks.Go(net.copyInboundFromNIC)
@@ -213,26 +251,19 @@ func (net *UserspaceNetwork) Close() error {
 	net.ep.RemoveNotify(net.notifyHandle)
 	net.ep.Close()
 
-	if net.stack.HasNIC(net.nicID) {
-		if err := net.stack.RemoveNIC(net.nicID); err != nil {
+	if net.stack.HasNIC(nicID) {
+		if err := net.stack.RemoveNIC(nicID); err != nil {
 			return fmt.Errorf("failed to remove NIC: %v", err)
 		}
 	}
 
 	// Stop copying packets to/from the NIC.
 	net.tasksCancel()
-
 	if err := net.tasks.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 
 	net.stack.Close()
-
-	if net.pcapFile != nil {
-		if err := net.pcapFile.Close(); err != nil {
-			return fmt.Errorf("failed to close packet capture file: %v", err)
-		}
-	}
 
 	return nil
 }
@@ -377,11 +408,11 @@ func (net *UserspaceNetwork) Hostname() (string, error) {
 	if net.hostname != "" {
 		return net.hostname, nil
 	}
-	return "", fmt.Errorf("hostname not set")
+	return "", errors.New("hostname not set")
 }
 
 func (net *UserspaceNetwork) InterfaceAddrs() (addrs []stdnet.Addr, err error) {
-	for _, addr := range net.stack.AllAddresses()[net.nicID] {
+	for _, addr := range net.stack.AllAddresses()[nicID] {
 		ip := stdnet.IP(addr.AddressWithPrefix.Address.AsSlice())
 
 		switch addr.Protocol {
@@ -458,7 +489,6 @@ func (net *UserspaceNetwork) DialContext(ctx context.Context, network, address s
 
 	// The error from the first address is most relevant.
 	var firstErr error
-
 	for i, addr := range addrs {
 		select {
 		case <-ctx.Done():
@@ -487,7 +517,7 @@ func (net *UserspaceNetwork) DialContext(ctx context.Context, network, address s
 			}
 		}
 
-		fa, pn := net.convertToFullAddr(netip.AddrPortFrom(addr, uint16(port)))
+		fa, pn := convertToFullAddr(nicID, netip.AddrPortFrom(addr, uint16(port)))
 
 		var c stdnet.Conn
 		switch proto {
@@ -546,7 +576,7 @@ func (net *UserspaceNetwork) Listen(network, address string) (stdnet.Listener, e
 		return nil, opErr
 	}
 
-	fa, pn := net.convertToFullAddr(netip.AddrPortFrom(addr, uint16(port)))
+	fa, pn := convertToFullAddr(nicID, netip.AddrPortFrom(addr, uint16(port)))
 
 	return gonet.ListenTCP(net.stack, fa, pn)
 }
@@ -583,7 +613,7 @@ func (net *UserspaceNetwork) ListenPacket(network, address string) (stdnet.Packe
 		return nil, opErr
 	}
 
-	fa, pn := net.convertToFullAddr(netip.AddrPortFrom(addr, uint16(port)))
+	fa, pn := convertToFullAddr(nicID, netip.AddrPortFrom(addr, uint16(port)))
 
 	return gonet.DialUDP(net.stack, &fa, nil, pn)
 }
@@ -613,7 +643,7 @@ func (net *UserspaceNetwork) bindAddress(host string, useIPV4, useIPV6 bool) (ad
 			pn = ipv6.ProtocolNumber
 		}
 
-		mainAddress, err := net.stack.GetMainNICAddress(net.nicID, pn)
+		mainAddress, err := net.stack.GetMainNICAddress(nicID, pn)
 		if err != nil {
 			return addr, ErrNoSuitableAddress
 		}
@@ -628,7 +658,7 @@ func (net *UserspaceNetwork) bindAddress(host string, useIPV4, useIPV6 bool) (ad
 	return addr, nil
 }
 
-func (net *UserspaceNetwork) convertToFullAddr(addrPort netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
+func convertToFullAddr(nicID tcpip.NICID, addrPort netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
 	var pn tcpip.NetworkProtocolNumber
 	if addrPort.Addr().Is4() {
 		pn = ipv4.ProtocolNumber
@@ -637,7 +667,7 @@ func (net *UserspaceNetwork) convertToFullAddr(addrPort netip.AddrPort) (tcpip.F
 	}
 
 	return tcpip.FullAddress{
-		NIC:  net.nicID,
+		NIC:  nicID,
 		Addr: tcpip.AddrFromSlice(addrPort.Addr().AsSlice()),
 		Port: addrPort.Port(),
 	}, pn

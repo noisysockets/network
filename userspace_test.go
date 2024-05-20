@@ -35,8 +35,7 @@ func TestUserspaceNetwork(t *testing.T) {
 		_ = nicB.Close()
 	})
 
-	netA, err := network.Userspace(ctx, logger.With(slog.String("net", "a")), nicA, &network.UserspaceNetworkOptions{
-		Hostname:  "a",
+	netA, err := network.Userspace(ctx, logger.With(slog.String("net", "a")), nicA, &network.UserspaceNetworkConfig{
 		Addresses: []netip.Prefix{netip.MustParsePrefix("172.21.248.1/32")},
 	})
 	require.NoError(t, err)
@@ -44,8 +43,7 @@ func TestUserspaceNetwork(t *testing.T) {
 		_ = netA.Close()
 	})
 
-	netB, err := network.Userspace(ctx, logger.With(slog.String("net", "b")), nicB, &network.UserspaceNetworkOptions{
-		Hostname:  "b",
+	netB, err := network.Userspace(ctx, logger.With(slog.String("net", "b")), nicB, &network.UserspaceNetworkConfig{
 		Addresses: []netip.Prefix{netip.MustParsePrefix("172.21.248.2/32")},
 	})
 	require.NoError(t, err)

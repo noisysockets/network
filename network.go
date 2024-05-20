@@ -12,17 +12,17 @@ package network
 
 import (
 	"context"
-	"errors"
 	"io"
 	stdnet "net"
+
+	"github.com/noisysockets/resolver"
 )
 
-var (
-	ErrInvalidPort           = errors.New("invalid port")
-	ErrMissingAddress        = errors.New("missing address")
-	ErrNoSuitableAddress     = errors.New("no suitable address found")
-	ErrUnexpectedAddressType = errors.New("unexpected address type")
-)
+// DialContextFunc is a function that dials a network address using a context.
+type DialContextFunc func(ctx context.Context, network, address string) (stdnet.Conn, error)
+
+// ResolverFactory is a function that creates a DNS resolver for a given dial function.
+type ResolverFactory func(dialContext DialContextFunc) resolver.Resolver
 
 // Network is an interface that abstracts the standard library's network operations.
 type Network interface {

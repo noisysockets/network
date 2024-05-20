@@ -47,10 +47,9 @@ func main() {
 		Level: slog.LevelDebug,
 	}))
 
+	logger.Info("Creating TUN interface", slog.String("name", "nsh0"))
+
 	ctx := context.Background()
-
-	logger.Info("Creating TUN interface")
-
 	nic, err := tun.CreateTUN(ctx, logger, "nsh0", tun.DefaultMTU)
 	if err != nil {
 		logger.Error("Failed to create TUN interface", slog.Any("error", err))
@@ -60,7 +59,7 @@ func main() {
 
 	logger.Info("Initializing userspace network stack")
 
-	net, err := network.Userspace(ctx, logger, nic, &network.UserspaceNetworkOptions{
+	net, err := network.Userspace(ctx, logger, nic, &network.UserspaceNetworkConfig{
 		Hostname: "demo",
 		Addresses: []netip.Prefix{
 			netip.MustParsePrefix("172.21.248.1/32"),
@@ -72,8 +71,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer net.Close()
-
-	logger.Info("Network stack initialized")
 
 	ctx, cancel := context.WithCancel(ctx)
 

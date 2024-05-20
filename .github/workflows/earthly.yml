@@ -26,4 +26,6 @@ jobs:
       run: earthly +lint
 
     - name: Test
-      run: earthly -P +test
+      run: |
+        earthly +test
+        earthly +examples
