@@ -19,6 +19,7 @@ import (
 
 var protoSplitter = regexp.MustCompile(`^(tcp|udp)(4|6)?$`)
 
+// TODO: no need for regex here, there's only 4 possible values.
 func parseNetwork(network string) (proto string, useIPV4, useIPV6 bool, err error) {
 	useIPV4, useIPV6 = true, true
 	matches := protoSplitter.FindStringSubmatch(network)

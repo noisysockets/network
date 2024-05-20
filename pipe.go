@@ -60,8 +60,8 @@ func Pipe(mtu, batchSize int) (Interface, Interface) {
 	return a, b
 }
 
-func (p *pipeEndpoint) Name() (string, error) {
-	return "PipeInterface", nil
+func (p *pipeEndpoint) Name() string {
+	return "PipeInterface"
 }
 
 func (p *pipeEndpoint) MTU() int {

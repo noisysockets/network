@@ -40,6 +40,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	stdnet "net"
@@ -578,7 +579,12 @@ func (net *UserspaceNetwork) Listen(network, address string) (stdnet.Listener, e
 
 	fa, pn := convertToFullAddr(nicID, netip.AddrPortFrom(addr, uint16(port)))
 
-	return gonet.ListenTCP(net.stack, fa, pn)
+	lis, err := gonet.ListenTCP(net.stack, fa, pn)
+	if err != nil {
+		return nil, err
+	}
+
+	return &userspaceListener{lis}, nil
 }
 
 func (net *UserspaceNetwork) ListenPacket(network, address string) (stdnet.PacketConn, error) {
@@ -671,4 +677,24 @@ func convertToFullAddr(nicID tcpip.NICID, addrPort netip.AddrPort) (tcpip.FullAd
 		Addr: tcpip.AddrFromSlice(addrPort.Addr().AsSlice()),
 		Port: addrPort.Port(),
 	}, pn
+}
+
+// userspaceListener is a wrapper around a net.Listener that translates errors
+// from the network stack to the standard library.
+type userspaceListener struct {
+	stdnet.Listener
+}
+
+func (l *userspaceListener) Accept() (stdnet.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		// The network stack was closed.
+		if strings.Contains(err.Error(), (&tcpip.ErrInvalidEndpointState{}).String()) {
+			return nil, stdnet.ErrClosed
+		}
+
+		return nil, err
+	}
+
+	return conn, nil
 }

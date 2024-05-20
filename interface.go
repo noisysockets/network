@@ -41,7 +41,7 @@ type Interface interface {
 	io.Closer
 
 	// Name returns the name of the interface.
-	Name() (string, error)
+	Name() string
 
 	// MTU returns the MTU of the interface.
 	MTU() int

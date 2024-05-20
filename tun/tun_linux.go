@@ -61,9 +61,7 @@ type NativeTun struct {
 
 	closeOnce sync.Once
 
-	nameOnce  sync.Once // guards calling initNameCache, which sets following fields
-	nameCache string    // name of interface
-	nameErr   error
+	name string // name of interface
 
 	readOpMu  sync.Mutex
 	writeOpMu sync.Mutex
@@ -106,6 +104,13 @@ func CreateTUN(ctx context.Context, logger *slog.Logger, name string, mtu int) (
 func CreateTUNFromFile(ctx context.Context, logger *slog.Logger, file *os.File, mtu int) (network.Interface, error) {
 	tun := &NativeTun{
 		tunFile: file,
+	}
+
+	var err error
+	tun.name, err = tun.nameSlow()
+	if err != nil {
+		_ = tun.Close()
+		return nil, err
 	}
 
 	if err := tun.setMTU(mtu); err != nil {
@@ -195,12 +200,7 @@ func (tun *NativeTun) Write(ctx context.Context, bufs [][]byte, sizes []int, off
 }
 
 func (tun *NativeTun) MTU() int {
-	name, err := tun.Name()
-	if err != nil {
-		tun.logger.Warn("Failed to get name of TUN device",
-			slog.Any("error", err))
-		return DefaultMTU
-	}
+	name := tun.Name()
 
 	// open datagram socket
 	fd, err := unix.Socket(
@@ -235,9 +235,8 @@ func (tun *NativeTun) MTU() int {
 	return int(*(*int32)(unsafe.Pointer(&ifr[unix.IFNAMSIZ])))
 }
 
-func (tun *NativeTun) Name() (string, error) {
-	tun.nameOnce.Do(tun.initNameCache)
-	return tun.nameCache, tun.nameErr
+func (tun *NativeTun) Name() string {
+	return tun.name
 }
 
 func (tun *NativeTun) BatchSize() int {
@@ -245,10 +244,7 @@ func (tun *NativeTun) BatchSize() int {
 }
 
 func (tun *NativeTun) setMTU(n int) error {
-	name, err := tun.Name()
-	if err != nil {
-		return err
-	}
+	name := tun.Name()
 
 	// open datagram socket
 	fd, err := unix.Socket(
@@ -277,10 +273,6 @@ func (tun *NativeTun) setMTU(n int) error {
 	}
 
 	return nil
-}
-
-func (tun *NativeTun) initNameCache() {
-	tun.nameCache, tun.nameErr = tun.nameSlow()
 }
 
 func (tun *NativeTun) nameSlow() (string, error) {
