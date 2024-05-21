@@ -15,6 +15,7 @@ import (
 )
 
 type pipeEndpoint struct {
+	name      string
 	ctx       context.Context
 	cancel    context.CancelFunc
 	mtu       int
@@ -35,11 +36,22 @@ func Pipe(mtu, batchSize int) (Interface, Interface) {
 	go func() {
 		<-ctx.Done()
 
-		close(aToB)
-		close(bToA)
+		// Drain the channels (so any blocked senders can exit).
+		for {
+			select {
+			case <-aToB:
+			case <-bToA:
+			default:
+				// Nuke'em.
+				close(aToB)
+				close(bToA)
+				return
+			}
+		}
 	}()
 
 	a := &pipeEndpoint{
+		name:      "pipe0",
 		ctx:       ctx,
 		cancel:    cancel,
 		mtu:       mtu,
@@ -49,6 +61,7 @@ func Pipe(mtu, batchSize int) (Interface, Interface) {
 	}
 
 	b := &pipeEndpoint{
+		name:      "pipe1",
 		ctx:       ctx,
 		cancel:    cancel,
 		mtu:       mtu,
@@ -61,7 +74,7 @@ func Pipe(mtu, batchSize int) (Interface, Interface) {
 }
 
 func (p *pipeEndpoint) Name() string {
-	return "PipeInterface"
+	return p.name
 }
 
 func (p *pipeEndpoint) MTU() int {

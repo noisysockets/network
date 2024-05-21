@@ -47,8 +47,8 @@ func parseAndFilterAddrs(addrs []string, useIPV4, useIPV6 bool) []netip.Addr {
 			continue
 		}
 
-		if (useIPV4 && addr.Is4()) || (useIPV6 && addr.Is6()) {
-			filtered = append(filtered, addr)
+		if (useIPV4 && addr.Unmap().Is4()) || (useIPV6 && addr.Is6()) {
+			filtered = append(filtered, addr.Unmap())
 		}
 	}
 	return filtered

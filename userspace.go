@@ -176,7 +176,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *Us
 	// Assign addresses to the NIC.
 	for _, addr := range conf.Addresses {
 		var pn tcpip.NetworkProtocolNumber
-		if addr.Addr().Is4() {
+		if addr.Addr().Unmap().Is4() {
 			pn = ipv4.ProtocolNumber
 		} else if addr.Addr().Is6() {
 			pn = ipv6.ProtocolNumber
@@ -193,7 +193,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *Us
 		protocolAddress := tcpip.ProtocolAddress{
 			Protocol: pn,
 			AddressWithPrefix: tcpip.AddressWithPrefix{
-				Address:   tcpip.AddrFromSlice(addr.Addr().AsSlice()),
+				Address:   tcpip.AddrFromSlice(addr.Addr().Unmap().AsSlice()),
 				PrefixLen: addr.Bits(),
 			},
 		}
@@ -619,8 +619,9 @@ func (net *UserspaceNetwork) ListenPacket(network, address string) (stdnet.Packe
 }
 
 // TODO: binding to both IPv4 and IPv6 / multiple addresses.
-// TODO: does wildcard address binding work?
 func (net *UserspaceNetwork) bindAddress(host string, useIPV4, useIPV6 bool) (addr netip.Addr, err error) {
+	allNICAddrs := net.stack.AllAddresses()[nicID]
+
 	if host != "" {
 		allAddrs, err := net.resolver.LookupHost(context.Background(), host)
 		if err != nil {
@@ -632,27 +633,37 @@ func (net *UserspaceNetwork) bindAddress(host string, useIPV4, useIPV6 bool) (ad
 			return addr, ErrNoSuitableAddress
 		}
 
-		// TODO: how to pick the best address?
-		addr = addrs[0]
+		// See if we find a matching address assigned to the NIC.
+		for _, addr := range addrs {
+			for _, nicAddr := range allNICAddrs {
+				if nicAddr.AddressWithPrefix.Address == tcpip.AddrFromSlice(addr.Unmap().AsSlice()) {
+					return addr, nil
+				}
+			}
+		}
+
+		// If it's not a wildcard address, return an error.
+		if !addrs[0].IsUnspecified() {
+			return addr, ErrNoSuitableAddress
+		}
+	}
+
+	var pn tcpip.NetworkProtocolNumber
+	if useIPV4 {
+		pn = ipv4.ProtocolNumber
 	} else {
-		// TODO: how to pick the best address?
-		var pn tcpip.NetworkProtocolNumber
-		if useIPV4 {
-			pn = ipv4.ProtocolNumber
-		} else {
-			pn = ipv6.ProtocolNumber
-		}
+		pn = ipv6.ProtocolNumber
+	}
 
-		mainAddress, err := net.stack.GetMainNICAddress(nicID, pn)
-		if err != nil {
-			return addr, ErrNoSuitableAddress
-		}
+	mainAddress, tcpipErr := net.stack.GetMainNICAddress(nicID, pn)
+	if tcpipErr != nil {
+		return addr, ErrNoSuitableAddress
+	}
 
-		var ok bool
-		addr, ok = netip.AddrFromSlice(mainAddress.Address.AsSlice())
-		if !ok {
-			return addr, ErrNoSuitableAddress
-		}
+	var ok bool
+	addr, ok = netip.AddrFromSlice(mainAddress.Address.AsSlice())
+	if !ok {
+		return addr, ErrNoSuitableAddress
 	}
 
 	return addr, nil
@@ -660,7 +671,7 @@ func (net *UserspaceNetwork) bindAddress(host string, useIPV4, useIPV6 bool) (ad
 
 func convertToFullAddr(nicID tcpip.NICID, addrPort netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
 	var pn tcpip.NetworkProtocolNumber
-	if addrPort.Addr().Is4() {
+	if addrPort.Addr().Unmap().Is4() {
 		pn = ipv4.ProtocolNumber
 	} else {
 		pn = ipv6.ProtocolNumber
@@ -668,7 +679,7 @@ func convertToFullAddr(nicID tcpip.NICID, addrPort netip.AddrPort) (tcpip.FullAd
 
 	return tcpip.FullAddress{
 		NIC:  nicID,
-		Addr: tcpip.AddrFromSlice(addrPort.Addr().AsSlice()),
+		Addr: tcpip.AddrFromSlice(addrPort.Addr().Unmap().AsSlice()),
 		Port: addrPort.Port(),
 	}, pn
 }
