@@ -9,7 +9,12 @@
 
 package network
 
-import "errors"
+import (
+	"errors"
+	"strings"
+
+	"github.com/noisysockets/netstack/pkg/tcpip"
+)
 
 var (
 	ErrInvalidPort           = errors.New("invalid port")
@@ -17,3 +22,9 @@ var (
 	ErrNoSuitableAddress     = errors.New("no suitable address found")
 	ErrUnexpectedAddressType = errors.New("unexpected address type")
 )
+
+// IsStackClosed checks if the error is due to the network stack being closed.
+// This is relevant to errors returned by the userspace network stack.
+func IsStackClosed(err error) bool {
+	return strings.Contains(err.Error(), (&tcpip.ErrInvalidEndpointState{}).String())
+}
