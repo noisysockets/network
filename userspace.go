@@ -81,20 +81,10 @@ type UserspaceNetworkConfig struct {
 	Addresses []netip.Prefix
 	// ResolverFactory is an optional factory to create a DNS resolver.
 	ResolverFactory ResolverFactory
-	// EnableSpoofing allows outgoing packets to have a source address different
-	// from the address assigned to the NIC.
-	EnableSpoofing bool
-	// EnablePromiscuousMode allows incoming packets to have a destination address
-	// different from the address assigned to the NIC.
-	EnablePromiscuousMode bool
 	// DisableIPv4 disables IPv4 support.
 	DisableIPv4 bool
 	// DisableIPv6 disables IPv6 support.
 	DisableIPv6 bool
-	// TCPProtocolHandler is a callback that is invoked when a TCP packet is received.
-	TCPProtocolHandler func(*tcp.ForwarderRequest)
-	// UDPProtocolHandler is a callback that is invoked when a UDP packet is received.
-	UDPProtocolHandler func(*udp.ForwarderRequest)
 	// PacketCaptureWriter is an optional writer to write a packet capture file to.
 	// If nil, no packet capture file will be written.
 	// This is useful for debugging network issues.
@@ -223,29 +213,6 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *Us
 		})
 	}
 
-	// Allow outgoing packets to have a source address different from the address
-	// assigned to the NIC.
-	if err := net.stack.SetSpoofing(nicID, conf.EnableSpoofing); err != nil {
-		return nil, fmt.Errorf("failed to configure spoofing: %v", err)
-	}
-
-	// Allows outgoing packets to have a destination address different from the
-	// address assigned to the NIC.
-	if err := net.stack.SetPromiscuousMode(nicID, conf.EnablePromiscuousMode); err != nil {
-		return nil, fmt.Errorf("failed to configure promiscuous mode: %v", err)
-	}
-
-	// Register custom protocol handlers (if any).
-	if conf.TCPProtocolHandler != nil {
-		tcpFwd := tcp.NewForwarder(net.stack, 0, maxInFlightTCPConnectionAttempts, conf.TCPProtocolHandler)
-		net.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
-	}
-
-	if conf.UDPProtocolHandler != nil {
-		udpFwd := udp.NewForwarder(net.stack, conf.UDPProtocolHandler)
-		net.stack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
-	}
-
 	// Begin copying packets to/from the NIC.
 	net.tasks.Go(net.copyInboundFromNIC)
 	net.tasks.Go(net.copyOutboundToNIC)
@@ -287,6 +254,31 @@ func (net *UserspaceNetwork) WriteNotify() {
 	}
 
 	net.outbound <- pkt
+}
+
+// EnableForwarding enables forwarding of TCP and UDP packets using the provided
+// forwarder implementation.
+func (net *UserspaceNetwork) EnableForwarding(forwarder Forwarder) error {
+	// Allow outgoing packets to have a source address different from the address
+	// assigned to the NIC.
+	if err := net.stack.SetSpoofing(nicID, true); err != nil {
+		return fmt.Errorf("failed to enable spoofing: %v", err)
+	}
+
+	// Allows outgoing packets to have a destination address different from the
+	// address assigned to the NIC.
+	if err := net.stack.SetPromiscuousMode(nicID, true); err != nil {
+		return fmt.Errorf("failed to enable promiscuous mode: %v", err)
+	}
+
+	// Forward TCP and UDP packets.
+	tcpFwd := tcp.NewForwarder(net.stack, 0, maxInFlightTCPConnectionAttempts, forwarder.TCPProtocolHandler)
+	net.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
+
+	udpFwd := udp.NewForwarder(net.stack, forwarder.UDPProtocolHandler)
+	net.stack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
+
+	return nil
 }
 
 func (net *UserspaceNetwork) copyInboundFromNIC() error {

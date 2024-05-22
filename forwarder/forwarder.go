@@ -34,6 +34,10 @@ const (
 	defaultUDPTimeout       = 30 * time.Second
 )
 
+var (
+	_ network.Forwarder = (*Forwarder)(nil)
+)
+
 // ForwarderConfig is the configuration for the TCP and UDP forwarder.
 type ForwarderConfig struct {
 	// Maximum number of concurrent TCP sessions.

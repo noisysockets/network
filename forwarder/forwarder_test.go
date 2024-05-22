@@ -38,20 +38,22 @@ func TestForwarder(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Forward out to the host network from net A.
-	fwd := forwarder.New(ctx, logger, network.Host(), nil)
-
 	netA, err := network.Userspace(ctx, logger.With(slog.String("net", "a")), nicA, &network.UserspaceNetworkConfig{
-		Addresses:             []netip.Prefix{netip.MustParsePrefix("100.64.0.1/32")},
-		EnableSpoofing:        true,
-		EnablePromiscuousMode: true,
-		TCPProtocolHandler:    fwd.TCPProtocolHandler,
-		UDPProtocolHandler:    fwd.UDPProtocolHandler,
+		Addresses: []netip.Prefix{netip.MustParsePrefix("100.64.0.1/32")},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = netA.Close()
 	})
+
+	// Forward out to the host network from net A.
+	fwd := forwarder.New(ctx, logger, network.Host(), nil)
+	t.Cleanup(func() {
+		_ = fwd.Close()
+	})
+
+	err = netA.EnableForwarding(fwd)
+	require.NoError(t, err)
 
 	netB, err := network.Userspace(ctx, logger.With(slog.String("net", "b")), nicB, &network.UserspaceNetworkConfig{
 		Addresses: []netip.Prefix{netip.MustParsePrefix("100.64.0.2/32")},

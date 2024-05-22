@@ -63,16 +63,10 @@ func main() {
 
 	logger.Info("Initializing userspace network stack")
 
-	fwd := forwarder.New(ctx, logger, network.Host(), nil)
-
 	net, err := network.Userspace(ctx, logger, nic, &network.UserspaceNetworkConfig{
 		Addresses: []netip.Prefix{
 			netip.MustParsePrefix("100.64.0.1/32"),
 		},
-		EnableSpoofing:        true,
-		EnablePromiscuousMode: true,
-		TCPProtocolHandler:    fwd.TCPProtocolHandler,
-		UDPProtocolHandler:    fwd.UDPProtocolHandler,
 	})
 	if err != nil {
 		_ = nic.Close()
@@ -80,6 +74,18 @@ func main() {
 		os.Exit(1)
 	}
 	defer net.Close()
+
+	logger.Info("Forwarding traffic to host network")
+
+	fwd := forwarder.New(ctx, logger, network.Host(), nil)
+	defer fwd.Close()
+
+	err = net.EnableForwarding(fwd)
+	if err != nil {
+		_ = net.Close()
+		logger.Error("Failed to enable forwarding", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

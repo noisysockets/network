@@ -22,6 +22,7 @@ test:
   COPY . .
   RUN go test -coverprofile=coverage.out -v ./...
   SAVE ARTIFACT coverage.out AS LOCAL coverage.out
+  BUILD +examples
 
 examples:
   COPY go.mod go.sum .

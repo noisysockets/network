@@ -15,14 +15,10 @@ import (
 	"io"
 	stdnet "net"
 
+	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
+	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
 	"github.com/noisysockets/resolver"
 )
-
-// DialContextFunc is a function that dials a network address using a context.
-type DialContextFunc func(ctx context.Context, network, address string) (stdnet.Conn, error)
-
-// ResolverFactory is a function that creates a DNS resolver from the given dial function.
-type ResolverFactory func(dialContext DialContextFunc) resolver.Resolver
 
 // Network is an interface that abstracts the standard library's network operations.
 type Network interface {
@@ -49,4 +45,18 @@ type Network interface {
 	// ListenPacket listens for incoming packets addressed to the local address.
 	// Known networks are "udp", "udp4" (IPv4-only), "udp6" (IPv6-only).
 	ListenPacket(network, address string) (stdnet.PacketConn, error)
+}
+
+// DialContextFunc is a function that dials a network address using a context.
+type DialContextFunc func(ctx context.Context, network, address string) (stdnet.Conn, error)
+
+// ResolverFactory is a function that creates a DNS resolver from the given dial function.
+type ResolverFactory func(dialContext DialContextFunc) resolver.Resolver
+
+// Forwarder is an interface that abstracts the forwarding of TCP and UDP sessions.
+type Forwarder interface {
+	// TCPProtocolHandler forwards a TCP session.
+	TCPProtocolHandler(req *tcp.ForwarderRequest)
+	// UDPProtocolHandler forwards a UDP session.
+	UDPProtocolHandler(req *udp.ForwarderRequest)
 }
