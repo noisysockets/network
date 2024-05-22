@@ -17,10 +17,10 @@
  *
  * For example:
  *
- *	$ sudo ip addr add 172.21.248.2/24 dev nsh0
+ *	$ sudo ip addr add 100.64.0.2/24 dev nsh0
  *	$ sudo ip link set dev nsh0 up
  *
- * You can then access the HTTP server by visiting http://172.21.248.1 in your
+ * You can then access the HTTP server by visiting http://100.64.0.1 in your
  * web browser.
  */
 package main
@@ -62,7 +62,7 @@ func main() {
 	net, err := network.Userspace(ctx, logger, nic, &network.UserspaceNetworkConfig{
 		Hostname: "demo",
 		Addresses: []netip.Prefix{
-			netip.MustParsePrefix("172.21.248.1/32"),
+			netip.MustParsePrefix("100.64.0.1/32"),
 		},
 	})
 	if err != nil {

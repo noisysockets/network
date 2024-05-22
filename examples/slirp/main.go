@@ -14,12 +14,12 @@
  * For testing you will need to create a network namespace:
  *
  *  $ sudo mkdir -p /etc/netns/slirp-ns
- *  $ echo "nameserver 1.1.1.1" | sudo tee /etc/netns/slirp-ns/resolv.conf
+ *  $ echo "nameserver 1.1.1.1" | sudo tee /etc/netns/slirp-ns/resolv.conf > /dev/null
  *  $ sudo ip netns add slirp-ns
  *  $ sudo ip link set nsh0 netns slirp-ns
- *  $ sudo ip netns exec slirp-ns ip addr add 172.21.248.2/24 dev nsh0
+ *  $ sudo ip netns exec slirp-ns ip addr add 100.64.0.2/24 dev nsh0
  *  $ sudo ip netns exec slirp-ns ip link set nsh0 up
- *  $ sudo ip netns exec slirp-ns ip route add default via 172.21.248.1 dev nsh0
+ *  $ sudo ip netns exec slirp-ns ip route add default via 100.64.0.1 dev nsh0
  *
  * You can then open a shell in the network namespace, any traffic will be
  * forwarded through the SLiRP example:
@@ -67,7 +67,7 @@ func main() {
 
 	net, err := network.Userspace(ctx, logger, nic, &network.UserspaceNetworkConfig{
 		Addresses: []netip.Prefix{
-			netip.MustParsePrefix("172.21.248.1/32"),
+			netip.MustParsePrefix("100.64.0.1/32"),
 		},
 		EnableSpoofing:        true,
 		EnablePromiscuousMode: true,

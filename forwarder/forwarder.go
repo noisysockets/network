@@ -111,9 +111,12 @@ func (f *Forwarder) TCPProtocolHandler(req *tcp.ForwarderRequest) {
 		ctx, cancel := context.WithCancel(f.ctx)
 		defer cancel()
 
-		if err := f.tcpSessionSem.Acquire(ctx, 1); err != nil {
+		if ok := f.tcpSessionSem.TryAcquire(1); !ok {
+			logger.Warn("Forwarder at capacity, rejecting session")
+			req.Complete(true)
 			return
 		}
+		defer f.tcpSessionSem.Release(1)
 
 		logger.Debug("Forwarding session")
 		defer logger.Debug("Session finished")
@@ -198,9 +201,11 @@ func (f *Forwarder) UDPProtocolHandler(req *udp.ForwarderRequest) {
 		ctx, cancel := context.WithCancel(f.ctx)
 		defer cancel()
 
-		if err := f.udpSessionSem.Acquire(ctx, 1); err != nil {
+		if ok := f.udpSessionSem.TryAcquire(1); !ok {
+			logger.Warn("Forwarder at capacity, rejecting session")
 			return
 		}
+		defer f.udpSessionSem.Release(1)
 
 		logger.Debug("Forwarding session")
 		defer logger.Debug("Session finished")

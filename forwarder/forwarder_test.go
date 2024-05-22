@@ -42,7 +42,7 @@ func TestForwarder(t *testing.T) {
 	fwd := forwarder.New(ctx, logger, network.Host(), nil)
 
 	netA, err := network.Userspace(ctx, logger.With(slog.String("net", "a")), nicA, &network.UserspaceNetworkConfig{
-		Addresses:             []netip.Prefix{netip.MustParsePrefix("172.21.248.1/32")},
+		Addresses:             []netip.Prefix{netip.MustParsePrefix("100.64.0.1/32")},
 		EnableSpoofing:        true,
 		EnablePromiscuousMode: true,
 		TCPProtocolHandler:    fwd.TCPProtocolHandler,
@@ -54,7 +54,7 @@ func TestForwarder(t *testing.T) {
 	})
 
 	netB, err := network.Userspace(ctx, logger.With(slog.String("net", "b")), nicB, &network.UserspaceNetworkConfig{
-		Addresses: []netip.Prefix{netip.MustParsePrefix("172.21.248.2/32")},
+		Addresses: []netip.Prefix{netip.MustParsePrefix("100.64.0.2/32")},
 		ResolverFactory: func(dialContext network.DialContextFunc) resolver.Resolver {
 			// Cloudflare DNS over UDP.
 			return resolver.Chain(resolver.IP(), resolver.DNS(&resolver.DNSResolverConfig{
