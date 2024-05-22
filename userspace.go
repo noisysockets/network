@@ -269,8 +269,8 @@ func (net *UserspaceNetwork) Close() error {
 		// Stop copying packets to/from the NIC.
 		net.tasksCancel()
 
-		err = net.tasks.Wait()
-		if err != nil && !errors.Is(err, context.Canceled) {
+		if tasksErr := net.tasks.Wait(); tasksErr != nil && !errors.Is(tasksErr, context.Canceled) {
+			err = tasksErr
 			return
 		}
 
