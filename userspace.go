@@ -40,6 +40,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	stdnet "net"
@@ -74,6 +75,8 @@ var (
 type UserspaceNetworkConfig struct {
 	// Hostname is the hostname of the local process.
 	Hostname string
+	// Domain is the local domain of the network.
+	Domain string
 	// Addresses is a list of IP addresses/IP prefixes to add.
 	Addresses []netip.Prefix
 	// ResolverFactory is an optional factory to create a DNS resolver.
@@ -102,6 +105,7 @@ type UserspaceNetwork struct {
 	logger       *slog.Logger
 	nic          Interface
 	hostname     string
+	domain       string
 	resolver     resolver.Resolver
 	stack        *stack.Stack
 	ep           *channel.Endpoint
@@ -110,6 +114,7 @@ type UserspaceNetwork struct {
 	tasks        *errgroup.Group
 	tasksCtx     context.Context
 	tasksCancel  context.CancelFunc
+	closeOnce    sync.Once
 }
 
 // Userspace returns a userspace Network implementation based on Netstack from
@@ -142,6 +147,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *Us
 		logger:      logger,
 		nic:         nic,
 		hostname:    conf.Hostname,
+		domain:      conf.Domain,
 		resolver:    resolver.IP(),
 		stack:       stack.New(stackOpts),
 		ep:          channel.New(outboundQueueSize, uint32(nic.MTU()), ""),
@@ -248,24 +254,30 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *Us
 }
 
 func (net *UserspaceNetwork) Close() error {
-	net.ep.RemoveNotify(net.notifyHandle)
-	net.ep.Close()
+	var err error
+	net.closeOnce.Do(func() {
+		net.ep.RemoveNotify(net.notifyHandle)
+		net.ep.Close()
 
-	if net.stack.HasNIC(nicID) {
-		if err := net.stack.RemoveNIC(nicID); err != nil {
-			return fmt.Errorf("failed to remove NIC: %v", err)
+		if net.stack.HasNIC(nicID) {
+			if tcpipErr := net.stack.RemoveNIC(nicID); tcpipErr != nil {
+				err = fmt.Errorf("failed to remove NIC: %v", err)
+				return
+			}
 		}
-	}
 
-	// Stop copying packets to/from the NIC.
-	net.tasksCancel()
-	if err := net.tasks.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
+		// Stop copying packets to/from the NIC.
+		net.tasksCancel()
 
-	net.stack.Close()
+		err = net.tasks.Wait()
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return
+		}
 
-	return nil
+		net.stack.Close()
+	})
+
+	return err
 }
 
 func (net *UserspaceNetwork) WriteNotify() {
@@ -409,6 +421,13 @@ func (net *UserspaceNetwork) Hostname() (string, error) {
 		return net.hostname, nil
 	}
 	return "", errors.New("hostname not set")
+}
+
+func (net *UserspaceNetwork) Domain() (string, error) {
+	if net.domain != "" {
+		return net.domain, nil
+	}
+	return "", errors.New("domain not set")
 }
 
 func (net *UserspaceNetwork) InterfaceAddrs() (addrs []stdnet.Addr, err error) {

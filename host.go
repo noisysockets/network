@@ -13,6 +13,10 @@ import (
 	"context"
 	stdnet "net"
 	"os"
+	"strings"
+
+	"github.com/miekg/dns"
+	"github.com/noisysockets/go-fqdn"
 )
 
 var (
@@ -33,6 +37,20 @@ func (net *HostNetwork) Close() error {
 
 func (net *HostNetwork) Hostname() (string, error) {
 	return os.Hostname()
+}
+
+func (net *HostNetwork) Domain() (string, error) {
+	hostname, err := net.Hostname()
+	if err != nil {
+		return "", err
+	}
+
+	fqdn, err := fqdn.FqdnHostname()
+	if err != nil {
+		return "", err
+	}
+
+	return dns.Fqdn(strings.TrimPrefix(fqdn, hostname+".")), nil
 }
 
 func (net *HostNetwork) InterfaceAddrs() ([]stdnet.Addr, error) {

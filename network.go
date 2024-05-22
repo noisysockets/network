@@ -21,7 +21,7 @@ import (
 // DialContextFunc is a function that dials a network address using a context.
 type DialContextFunc func(ctx context.Context, network, address string) (stdnet.Conn, error)
 
-// ResolverFactory is a function that creates a DNS resolver for a given dial function.
+// ResolverFactory is a function that creates a DNS resolver from the given dial function.
 type ResolverFactory func(dialContext DialContextFunc) resolver.Resolver
 
 // Network is an interface that abstracts the standard library's network operations.
@@ -29,6 +29,8 @@ type Network interface {
 	io.Closer
 	// Hostname returns the hostname of the local machine.
 	Hostname() (string, error)
+	// Domain returns the domain of the local machine.
+	Domain() (string, error)
 	// InterfaceAddrs returns a list of the network interfaces addresses.
 	InterfaceAddrs() ([]stdnet.Addr, error)
 	// LookupHost looks up the IP addresses for the given host.
