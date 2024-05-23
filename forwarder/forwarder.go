@@ -43,6 +43,8 @@ var (
 type ForwarderConfig struct {
 	// Allowed destination prefixes.
 	AllowedDestinations []netip.Prefix
+	// Denied destination prefixes.
+	DeniedDestinations []netip.Prefix
 	// Maximum number of concurrent TCP sessions.
 	MaxConcurrentTCP *int
 	// Maximum number of concurrent UDP sessions.
@@ -61,6 +63,7 @@ type Forwarder struct {
 	udpSessionSem       *semaphore.Weighted
 	udpTimeout          time.Duration
 	allowedDestinations *cidrs.TrieMap[struct{}]
+	deniedDestinations  *cidrs.TrieMap[struct{}]
 }
 
 // New creates a new TCP and UDP forwarder.
@@ -89,6 +92,11 @@ func New(ctx context.Context, logger *slog.Logger, net network.Network, conf *Fo
 		allowedDestinations.Insert(prefix, struct{}{})
 	}
 
+	deniedDestinations := cidrs.NewTrieMap[struct{}]()
+	for _, prefix := range conf.DeniedDestinations {
+		deniedDestinations.Insert(prefix, struct{}{})
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &Forwarder{
@@ -100,6 +108,7 @@ func New(ctx context.Context, logger *slog.Logger, net network.Network, conf *Fo
 		udpSessionSem:       semaphore.NewWeighted(int64(maxConcurrentUDP)),
 		udpTimeout:          udpTimeout,
 		allowedDestinations: allowedDestinations,
+		deniedDestinations:  deniedDestinations,
 	}
 }
 
@@ -121,7 +130,14 @@ func (f *Forwarder) TCPProtocolHandler(req *tcp.ForwarderRequest) {
 		slog.String("src", srcAddrPort.String()),
 		slog.String("dst", dstAddrPort.String()))
 
-	if _, ok := f.allowedDestinations.Get(dstAddrPort.Addr()); !ok {
+	_, allowed := f.allowedDestinations.Get(dstAddrPort.Addr())
+	if allowed {
+		if _, denied := f.deniedDestinations.Get(dstAddrPort.Addr()); denied {
+			allowed = false
+		}
+	}
+
+	if !allowed {
 		logger.Warn("Destination not allowed")
 		req.Complete(true)
 		return
@@ -206,8 +222,20 @@ func (f *Forwarder) UDPProtocolHandler(req *udp.ForwarderRequest) {
 		slog.String("src", srcAddrPort.String()),
 		slog.String("dst", dstAddrPort.String()))
 
-	if _, ok := f.allowedDestinations.Get(dstAddrPort.Addr()); !ok {
+	_, allowed := f.allowedDestinations.Get(dstAddrPort.Addr())
+	if allowed {
+		if _, denied := f.deniedDestinations.Get(dstAddrPort.Addr()); denied {
+			allowed = false
+		}
+	}
+
+	if !allowed {
 		logger.Warn("Destination not allowed")
+		return
+	}
+
+	if ok := f.udpSessionSem.TryAcquire(1); !ok {
+		logger.Warn("Forwarder at capacity, rejecting session")
 		return
 	}
 
@@ -223,14 +251,10 @@ func (f *Forwarder) UDPProtocolHandler(req *udp.ForwarderRequest) {
 	}
 
 	go func() {
+		defer f.udpSessionSem.Release(1)
+
 		ctx, cancel := context.WithCancel(f.ctx)
 		defer cancel()
-
-		if ok := f.udpSessionSem.TryAcquire(1); !ok {
-			logger.Warn("Forwarder at capacity, rejecting session")
-			return
-		}
-		defer f.udpSessionSem.Release(1)
 
 		logger.Debug("Forwarding session")
 		defer logger.Debug("Session finished")
