@@ -312,11 +312,13 @@ func (net *UserspaceNetwork) EnableForwarding(forwarder Forwarder) error {
 
 			if _, ok := localPrefixes.Get(dstAddr); ok {
 				// Not handled by the forwarder (local traffic).
+				net.logger.Debug("Not forwarding local traffic", slog.String("dstAddr", dstAddr.String()))
 				return false
 			}
 
 			if !forwarder.ValidDestination(dstAddr) {
 				// Not handled by the forwarder.
+				net.logger.Debug("Not forwarding traffic to invalid destination", slog.String("dstAddr", dstAddr.String()))
 				return false
 			}
 
