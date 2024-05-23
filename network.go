@@ -14,6 +14,7 @@ import (
 	"context"
 	"io"
 	stdnet "net"
+	"net/netip"
 
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
@@ -59,4 +60,6 @@ type Forwarder interface {
 	TCPProtocolHandler(req *tcp.ForwarderRequest)
 	// UDPProtocolHandler forwards a UDP session.
 	UDPProtocolHandler(req *udp.ForwarderRequest)
+	// ValidDestination checks if the destination address is valid for forwarding.
+	ValidDestination(addr netip.Addr) bool
 }

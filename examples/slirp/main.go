@@ -77,7 +77,17 @@ func main() {
 
 	logger.Info("Forwarding traffic to host network")
 
-	fwd := forwarder.New(ctx, logger, network.Host(), nil)
+	fwd := forwarder.New(ctx, logger, network.Host(), &forwarder.ForwarderConfig{
+		AllowedDestinations: []netip.Prefix{
+			netip.MustParsePrefix("0.0.0.0/0"),
+			netip.MustParsePrefix("::/0"),
+		},
+		DeniedDestinations: []netip.Prefix{
+			// Deny loopback traffic.
+			netip.MustParsePrefix("127.0.0.0/8"),
+			netip.MustParsePrefix("::1/128"),
+		},
+	})
 	defer fwd.Close()
 
 	err = net.EnableForwarding(fwd)

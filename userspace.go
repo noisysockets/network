@@ -57,6 +57,7 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/icmp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
+	"github.com/noisysockets/network/cidrs"
 	"github.com/noisysockets/resolver"
 	"golang.org/x/sync/errgroup"
 )
@@ -271,12 +272,64 @@ func (net *UserspaceNetwork) EnableForwarding(forwarder Forwarder) error {
 		return fmt.Errorf("failed to enable promiscuous mode: %v", err)
 	}
 
+	type packetHandler func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool
+
+	localPrefixes := cidrs.NewTrieMap[struct{}]()
+	for _, addr := range net.stack.AllAddresses()[nicID] {
+		localPrefixes.Insert(netip.MustParsePrefix(addr.AddressWithPrefix.String()), struct{}{})
+	}
+
+	handlerForDestination := func(h packetHandler) packetHandler {
+		return func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+			hdr := pkt.NetworkHeader().View().AsSlice()
+
+			var ok bool
+			var dstAddr netip.Addr
+			switch hdr[0] >> 4 {
+			case header.IPv4Version:
+				if len(hdr) < header.IPv4MinimumSize {
+					net.logger.Error("Invalid IPv4 header length")
+					return false
+				}
+
+				dstAddr, ok = netip.AddrFromSlice(hdr[16:20])
+			case header.IPv6Version:
+				if len(hdr) < header.IPv6MinimumSize {
+					net.logger.Error("Invalid IPv6 header length")
+					return false
+				}
+
+				dstAddr, ok = netip.AddrFromSlice(hdr[24:40])
+				dstAddr = dstAddr.Unmap()
+			default:
+				net.logger.Error("Unknown IP version", slog.Int("version", int(hdr[0]>>4)))
+				return false
+			}
+			if !ok {
+				net.logger.Error("Failed to parse destination address")
+				return false
+			}
+
+			if _, ok := localPrefixes.Get(dstAddr); ok {
+				// Not handled by the forwarder (local traffic).
+				return false
+			}
+
+			if !forwarder.ValidDestination(dstAddr) {
+				// Not handled by the forwarder.
+				return false
+			}
+
+			return h(id, pkt)
+		}
+	}
+
 	// Forward TCP and UDP packets.
 	tcpFwd := tcp.NewForwarder(net.stack, 0, maxInFlightTCPConnectionAttempts, forwarder.TCPProtocolHandler)
-	net.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpFwd.HandlePacket)
+	net.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, handlerForDestination(tcpFwd.HandlePacket))
 
 	udpFwd := udp.NewForwarder(net.stack, forwarder.UDPProtocolHandler)
-	net.stack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
+	net.stack.SetTransportProtocolHandler(udp.ProtocolNumber, handlerForDestination(udpFwd.HandlePacket))
 
 	return nil
 }

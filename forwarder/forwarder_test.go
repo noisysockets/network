@@ -48,8 +48,11 @@ func TestForwarder(t *testing.T) {
 
 	// Forward out to the host network from net A.
 	fwd := forwarder.New(ctx, logger, network.Host(), &forwarder.ForwarderConfig{
-		AllowedDestinations: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")},
-		// Deny localhost traffic.
+		AllowedDestinations: []netip.Prefix{
+			netip.MustParsePrefix("0.0.0.0/0"),
+			netip.MustParsePrefix("::/0"),
+		},
+		// Deny loopback traffic.
 		DeniedDestinations: []netip.Prefix{
 			netip.MustParsePrefix("127.0.0.0/8"),
 			netip.MustParsePrefix("::1/128"),
