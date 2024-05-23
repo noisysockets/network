@@ -25,6 +25,7 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
 	"github.com/noisysockets/netstack/pkg/waiter"
 	"github.com/noisysockets/network"
+	"github.com/noisysockets/network/cidrs"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -40,6 +41,8 @@ var (
 
 // ForwarderConfig is the configuration for the TCP and UDP forwarder.
 type ForwarderConfig struct {
+	// Allowed destination prefixes.
+	AllowedDestinations []netip.Prefix
 	// Maximum number of concurrent TCP sessions.
 	MaxConcurrentTCP *int
 	// Maximum number of concurrent UDP sessions.
@@ -50,13 +53,14 @@ type ForwarderConfig struct {
 
 // Forwarder forwards TCP and UDP sessions to the provided network.
 type Forwarder struct {
-	logger        *slog.Logger
-	net           network.Network
-	ctx           context.Context
-	cancel        context.CancelFunc
-	tcpSessionSem *semaphore.Weighted
-	udpSessionSem *semaphore.Weighted
-	udpTimeout    time.Duration
+	logger              *slog.Logger
+	net                 network.Network
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	tcpSessionSem       *semaphore.Weighted
+	udpSessionSem       *semaphore.Weighted
+	udpTimeout          time.Duration
+	allowedDestinations *cidrs.TrieMap[struct{}]
 }
 
 // New creates a new TCP and UDP forwarder.
@@ -80,16 +84,22 @@ func New(ctx context.Context, logger *slog.Logger, net network.Network, conf *Fo
 		udpTimeout = *conf.UDPTimeout
 	}
 
+	allowedDestinations := cidrs.NewTrieMap[struct{}]()
+	for _, prefix := range conf.AllowedDestinations {
+		allowedDestinations.Insert(prefix, struct{}{})
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 
 	return &Forwarder{
-		logger:        logger,
-		net:           net,
-		ctx:           ctx,
-		cancel:        cancel,
-		tcpSessionSem: semaphore.NewWeighted(int64(maxConcurrentTCP)),
-		udpSessionSem: semaphore.NewWeighted(int64(maxConcurrentUDP)),
-		udpTimeout:    udpTimeout,
+		logger:              logger,
+		net:                 net,
+		ctx:                 ctx,
+		cancel:              cancel,
+		tcpSessionSem:       semaphore.NewWeighted(int64(maxConcurrentTCP)),
+		udpSessionSem:       semaphore.NewWeighted(int64(maxConcurrentUDP)),
+		udpTimeout:          udpTimeout,
+		allowedDestinations: allowedDestinations,
 	}
 }
 
@@ -110,6 +120,12 @@ func (f *Forwarder) TCPProtocolHandler(req *tcp.ForwarderRequest) {
 		slog.String("proto", "tcp"),
 		slog.String("src", srcAddrPort.String()),
 		slog.String("dst", dstAddrPort.String()))
+
+	if _, ok := f.allowedDestinations.Get(dstAddrPort.Addr()); !ok {
+		logger.Warn("Destination not allowed")
+		req.Complete(true)
+		return
+	}
 
 	go func() {
 		ctx, cancel := context.WithCancel(f.ctx)
@@ -189,6 +205,11 @@ func (f *Forwarder) UDPProtocolHandler(req *udp.ForwarderRequest) {
 		slog.String("proto", "udp"),
 		slog.String("src", srcAddrPort.String()),
 		slog.String("dst", dstAddrPort.String()))
+
+	if _, ok := f.allowedDestinations.Get(dstAddrPort.Addr()); !ok {
+		logger.Warn("Destination not allowed")
+		return
+	}
 
 	// Create endpoint as quickly as possible to avoid UDP race conditions, when
 	// multiple frames are in flight.

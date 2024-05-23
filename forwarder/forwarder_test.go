@@ -32,8 +32,8 @@ func TestForwarder(t *testing.T) {
 	// Create what is essentially a userspace veth pair.
 	nicA, nicB := network.Pipe(1500, 16)
 	t.Cleanup(func() {
-		_ = nicA.Close()
-		_ = nicB.Close()
+		require.NoError(t, nicA.Close())
+		require.NoError(t, nicB.Close())
 	})
 
 	ctx := context.Background()
@@ -47,7 +47,9 @@ func TestForwarder(t *testing.T) {
 	})
 
 	// Forward out to the host network from net A.
-	fwd := forwarder.New(ctx, logger, network.Host(), nil)
+	fwd := forwarder.New(ctx, logger, network.Host(), &forwarder.ForwarderConfig{
+		AllowedDestinations: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")},
+	})
 	t.Cleanup(func() {
 		_ = fwd.Close()
 	})
