@@ -11,6 +11,7 @@ package network
 
 import (
 	"context"
+	"os"
 	"sync/atomic"
 )
 
@@ -108,14 +109,24 @@ func (p *pipeEndpoint) Read(ctx context.Context, bufs [][]byte, sizes []int, off
 			select {
 			case <-ctx.Done():
 				return n, ctx.Err()
-			case packet := <-p.recvCh:
+			case packet, ok := <-p.recvCh:
+				if !ok {
+					// No more packets available.
+					return 0, os.ErrClosed
+				}
+
 				processPacket(i, packet)
 			}
 		} else {
 			select {
 			case <-ctx.Done():
 				return n, ctx.Err()
-			case packet := <-p.recvCh:
+			case packet, ok := <-p.recvCh:
+				if !ok {
+					// No more packets available.
+					return n, os.ErrClosed
+				}
+
 				processPacket(i, packet)
 			default:
 				// No more packets available.
@@ -133,7 +144,7 @@ func (p *pipeEndpoint) Write(ctx context.Context, bufs [][]byte, sizes []int, of
 		copy(packet, buf[offset:offset+sizes[i]])
 
 		if p.sendClosing.Load() {
-			return i, nil
+			break
 		}
 
 		select {
