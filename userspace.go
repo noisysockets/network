@@ -281,46 +281,31 @@ func (net *UserspaceNetwork) EnableForwarding(forwarder Forwarder) error {
 
 	handlerForDestination := func(h packetHandler) packetHandler {
 		return func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
-			hdr := pkt.NetworkHeader().View().AsSlice()
+			logger := net.logger.With(
+				slog.String("srcAddr", id.RemoteAddress.String()),
+				slog.String("dstAddr", id.LocalAddress.String()))
 
-			var ok bool
-			var dstAddr netip.Addr
-			switch hdr[0] >> 4 {
-			case header.IPv4Version:
-				if len(hdr) < header.IPv4MinimumSize {
-					net.logger.Error("Invalid IPv4 header length")
-					return false
-				}
+			logger.Debug("Received packet")
 
-				dstAddr, ok = netip.AddrFromSlice(hdr[16:20])
-			case header.IPv6Version:
-				if len(hdr) < header.IPv6MinimumSize {
-					net.logger.Error("Invalid IPv6 header length")
-					return false
-				}
-
-				dstAddr, ok = netip.AddrFromSlice(hdr[24:40])
-				dstAddr = dstAddr.Unmap()
-			default:
-				net.logger.Error("Unknown IP version", slog.Int("version", int(hdr[0]>>4)))
-				return false
-			}
+			dstAddr, ok := netip.AddrFromSlice(id.LocalAddress.AsSlice())
 			if !ok {
-				net.logger.Error("Failed to parse destination address")
+				logger.Debug("Failed to parse destination address")
 				return false
 			}
 
 			if _, ok := localPrefixes.Get(dstAddr); ok {
 				// Not handled by the forwarder (local traffic).
-				net.logger.Debug("Not forwarding local traffic", slog.String("dstAddr", dstAddr.String()))
+				logger.Debug("Not forwarding local traffic")
 				return false
 			}
 
 			if !forwarder.ValidDestination(dstAddr) {
 				// Not handled by the forwarder.
-				net.logger.Debug("Not forwarding traffic to invalid destination", slog.String("dstAddr", dstAddr.String()))
+				logger.Debug("Not forwarding traffic to invalid destination")
 				return false
 			}
+
+			logger.Debug("Forwarding packet")
 
 			return h(id, pkt)
 		}
