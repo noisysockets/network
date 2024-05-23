@@ -11,17 +11,17 @@ package network
 
 import (
 	"context"
-	stdnet "net"
+	"sync/atomic"
 )
 
 type pipeEndpoint struct {
-	name      string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mtu       int
-	batchSize int
-	recvCh    chan []byte
-	sendCh    chan []byte
+	name        string
+	cancel      context.CancelFunc
+	mtu         int
+	batchSize   int
+	sendClosing atomic.Bool
+	recvCh      chan []byte
+	sendCh      chan []byte
 }
 
 // Pipe creates a pair of connected interfaces that can be used to simulate a
@@ -33,26 +33,8 @@ func Pipe(mtu, batchSize int) (Interface, Interface) {
 	aToB := make(chan []byte, batchSize)
 	bToA := make(chan []byte, batchSize)
 
-	go func() {
-		<-ctx.Done()
-
-		// Drain the channels (so any blocked senders can exit).
-		for {
-			select {
-			case <-aToB:
-			case <-bToA:
-			default:
-				// Nuke'em.
-				close(aToB)
-				close(bToA)
-				return
-			}
-		}
-	}()
-
 	a := &pipeEndpoint{
 		name:      "pipe0",
-		ctx:       ctx,
 		cancel:    cancel,
 		mtu:       mtu,
 		batchSize: batchSize,
@@ -62,13 +44,41 @@ func Pipe(mtu, batchSize int) (Interface, Interface) {
 
 	b := &pipeEndpoint{
 		name:      "pipe1",
-		ctx:       ctx,
 		cancel:    cancel,
 		mtu:       mtu,
 		batchSize: batchSize,
 		recvCh:    aToB,
 		sendCh:    bToA,
 	}
+
+	go func() {
+		<-ctx.Done()
+
+		// Signal that we are closing.
+		a.sendClosing.Store(true)
+		b.sendClosing.Store(true)
+
+		// Drain the channels as they might be blocked on a send.
+		for {
+			select {
+			case <-a.sendCh:
+				continue
+			default:
+			}
+			close(a.sendCh)
+			break
+		}
+
+		for {
+			select {
+			case <-b.sendCh:
+				continue
+			default:
+			}
+			close(b.sendCh)
+			break
+		}
+	}()
 
 	return a, b
 }
@@ -98,8 +108,6 @@ func (p *pipeEndpoint) Read(ctx context.Context, bufs [][]byte, sizes []int, off
 			select {
 			case <-ctx.Done():
 				return n, ctx.Err()
-			case <-p.ctx.Done():
-				return n, stdnet.ErrClosed
 			case packet := <-p.recvCh:
 				processPacket(i, packet)
 			}
@@ -107,8 +115,6 @@ func (p *pipeEndpoint) Read(ctx context.Context, bufs [][]byte, sizes []int, off
 			select {
 			case <-ctx.Done():
 				return n, ctx.Err()
-			case <-p.ctx.Done():
-				return n, stdnet.ErrClosed
 			case packet := <-p.recvCh:
 				processPacket(i, packet)
 			default:
@@ -125,11 +131,14 @@ func (p *pipeEndpoint) Write(ctx context.Context, bufs [][]byte, sizes []int, of
 	for i, buf := range bufs {
 		packet := make([]byte, sizes[i])
 		copy(packet, buf[offset:offset+sizes[i]])
+
+		if p.sendClosing.Load() {
+			return i, nil
+		}
+
 		select {
 		case <-ctx.Done():
 			return i, ctx.Err()
-		case <-p.ctx.Done():
-			return i, stdnet.ErrClosed
 		case p.sendCh <- packet:
 			// packet sent successfully
 		}
