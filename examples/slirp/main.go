@@ -63,13 +63,12 @@ func main() {
 
 	logger.Info("Initializing userspace network stack")
 
-	net, err := network.Userspace(ctx, logger, nic, &network.UserspaceNetworkConfig{
+	net, err := network.Userspace(ctx, logger, nic, network.UserspaceNetworkConfig{
 		Addresses: []netip.Prefix{
 			netip.MustParsePrefix("100.64.0.1/32"),
 		},
 	})
 	if err != nil {
-		_ = nic.Close()
 		logger.Error("Failed to create userspace network", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -77,22 +76,20 @@ func main() {
 
 	logger.Info("Forwarding traffic to host network")
 
-	fwd := forwarder.New(ctx, logger, network.Host(), &forwarder.ForwarderConfig{
+	fwd, err := forwarder.New(ctx, logger, net, network.Host(), &forwarder.ForwarderConfig{
 		AllowedDestinations: []netip.Prefix{
 			netip.MustParsePrefix("0.0.0.0/0"),
 			netip.MustParsePrefix("::/0"),
 		},
-		DeniedDestinations: []netip.Prefix{
-			// Deny loopback traffic.
-			netip.MustParsePrefix("127.0.0.0/8"),
-			netip.MustParsePrefix("::1/128"),
-		},
 	})
+	if err != nil {
+		logger.Error("Failed to create forwarder", slog.Any("error", err))
+		os.Exit(1)
+	}
 	defer fwd.Close()
 
 	err = net.EnableForwarding(fwd)
 	if err != nil {
-		_ = net.Close()
 		logger.Error("Failed to enable forwarding", slog.Any("error", err))
 		os.Exit(1)
 	}

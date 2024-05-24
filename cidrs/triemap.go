@@ -98,7 +98,6 @@ type trieMap struct {
 	ipv6Root *trieNode
 }
 
-// TODO: path compression
 type trieNode struct {
 	// children for 0 and 1 bits
 	child0 *trieNode

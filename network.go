@@ -16,8 +16,7 @@ import (
 	stdnet "net"
 	"net/netip"
 
-	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
-	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
+	"github.com/noisysockets/netstack/pkg/tcpip/stack"
 	"github.com/noisysockets/resolver"
 )
 
@@ -54,12 +53,16 @@ type DialContextFunc func(ctx context.Context, network, address string) (stdnet.
 // ResolverFactory is a function that creates a DNS resolver from the given dial function.
 type ResolverFactory func(dialContext DialContextFunc) resolver.Resolver
 
-// Forwarder is an interface that abstracts the forwarding of TCP and UDP sessions.
+// Forwarders can be used to forward network sessions to another network.
 type Forwarder interface {
 	// TCPProtocolHandler forwards a TCP session.
-	TCPProtocolHandler(req *tcp.ForwarderRequest)
+	TCPProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool
 	// UDPProtocolHandler forwards a UDP session.
-	UDPProtocolHandler(req *udp.ForwarderRequest)
+	UDPProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool
+	// ICMPProtocolHandler forwards an ICMP session.
+	ICMPv4ProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool
+	// ICMPv6ProtocolHandler forwards an ICMPv6 session.
+	ICMPv6ProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool
 	// ValidDestination checks if the destination address is valid for forwarding.
 	ValidDestination(addr netip.Addr) bool
 }

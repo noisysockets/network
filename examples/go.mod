@@ -9,6 +9,7 @@ require github.com/noisysockets/network v0.0.0-00010101000000-000000000000
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/google/btree v1.1.2 // indirect
+	github.com/jinzhu/copier v0.4.0 // indirect
 	github.com/kevinburke/hostsfile v0.0.0-20220522040509-e5e984885321 // indirect
 	github.com/miekg/dns v1.1.59 // indirect
 	github.com/noisysockets/contextio v0.3.0 // indirect

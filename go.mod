@@ -3,6 +3,8 @@ module github.com/noisysockets/network
 go 1.22.0
 
 require (
+	dario.cat/mergo v1.0.0
+	github.com/jinzhu/copier v0.4.0
 	github.com/miekg/dns v1.1.59
 	github.com/neilotoole/slogt v1.1.0
 	github.com/noisysockets/contextio v0.3.0
@@ -15,7 +17,6 @@ require (
 )
 
 require (
-	dario.cat/mergo v1.0.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/kevinburke/hostsfile v0.0.0-20220522040509-e5e984885321 // indirect

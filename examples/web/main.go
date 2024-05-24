@@ -59,14 +59,13 @@ func main() {
 
 	logger.Info("Initializing userspace network stack")
 
-	net, err := network.Userspace(ctx, logger, nic, &network.UserspaceNetworkConfig{
+	net, err := network.Userspace(ctx, logger, nic, network.UserspaceNetworkConfig{
 		Hostname: "demo",
 		Addresses: []netip.Prefix{
 			netip.MustParsePrefix("100.64.0.1/32"),
 		},
 	})
 	if err != nil {
-		_ = nic.Close()
 		logger.Error("Failed to create userspace network", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -84,8 +83,6 @@ func main() {
 	}()
 
 	if err := runWebServer(ctx, logger, net); err != nil {
-		_ = net.Close()
-		_ = nic.Close()
 		logger.Error("Failed to run server", slog.Any("error", err))
 		os.Exit(1)
 	}

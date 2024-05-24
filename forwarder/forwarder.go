@@ -13,38 +13,35 @@ package forwarder
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"os"
 	"time"
 
 	"github.com/noisysockets/contextio"
-	"github.com/noisysockets/netstack/pkg/tcpip"
 	"github.com/noisysockets/netstack/pkg/tcpip/adapters/gonet"
+	"github.com/noisysockets/netstack/pkg/tcpip/header"
+	"github.com/noisysockets/netstack/pkg/tcpip/stack"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
 	"github.com/noisysockets/netstack/pkg/waiter"
 	"github.com/noisysockets/network"
 	"github.com/noisysockets/network/cidrs"
+	"github.com/noisysockets/network/internal/util"
 	"golang.org/x/sync/semaphore"
 )
 
-const (
-	defaultMaxConcurrentTCP = 1024
-	defaultMaxConcurrentUDP = 1024
-	defaultUDPTimeout       = 30 * time.Second
-)
+var _ network.Forwarder = (*Forwarder)(nil)
 
-var (
-	_ network.Forwarder = (*Forwarder)(nil)
-)
-
-// ForwarderConfig is the configuration for the TCP and UDP forwarder.
+// ForwarderConfig is the configuration for the network session forwarder.
 type ForwarderConfig struct {
 	// Allowed destination prefixes.
 	AllowedDestinations []netip.Prefix
 	// Denied destination prefixes.
 	DeniedDestinations []netip.Prefix
+	// Maximum number of in-flight TCP connection attempts.
+	MaxInFlightTCPConnectionAttempts *int
 	// Maximum number of concurrent TCP sessions.
 	MaxConcurrentTCP *int
 	// Maximum number of concurrent UDP sessions.
@@ -53,12 +50,27 @@ type ForwarderConfig struct {
 	UDPTimeout *time.Duration
 }
 
-// Forwarder forwards TCP and UDP sessions to the provided network.
+// Default values (if not set).
+var defaultForwarderConf = ForwarderConfig{
+	DeniedDestinations: []netip.Prefix{
+		// Deny loopback traffic.
+		netip.MustParsePrefix("127.0.0.0/8"),
+		netip.MustParsePrefix("::1/128"),
+	},
+	MaxInFlightTCPConnectionAttempts: util.PointerTo(16),
+	MaxConcurrentTCP:                 util.PointerTo(1024),
+	MaxConcurrentUDP:                 util.PointerTo(1024),
+	UDPTimeout:                       util.PointerTo(30 * time.Second),
+}
+
+// Forwarder is a network session forwarder.
 type Forwarder struct {
-	logger              *slog.Logger
-	net                 network.Network
 	ctx                 context.Context
 	cancel              context.CancelFunc
+	logger              *slog.Logger
+	dstNet              network.Network
+	tcpForwarder        *tcp.Forwarder
+	udpForwarder        *udp.Forwarder
 	tcpSessionCounter   *semaphore.Weighted
 	udpSessionCounter   *semaphore.Weighted
 	udpTimeout          time.Duration
@@ -66,25 +78,10 @@ type Forwarder struct {
 	deniedDestinations  *cidrs.TrieMap[struct{}]
 }
 
-// New creates a new TCP and UDP forwarder.
-func New(ctx context.Context, logger *slog.Logger, net network.Network, conf *ForwarderConfig) *Forwarder {
-	if conf == nil {
-		conf = &ForwarderConfig{}
-	}
-
-	maxConcurrentTCP := defaultMaxConcurrentTCP
-	if conf.MaxConcurrentTCP != nil {
-		maxConcurrentTCP = *conf.MaxConcurrentTCP
-	}
-
-	maxConcurrentUDP := defaultMaxConcurrentUDP
-	if conf.MaxConcurrentUDP != nil {
-		maxConcurrentUDP = *conf.MaxConcurrentUDP
-	}
-
-	udpTimeout := defaultUDPTimeout
-	if conf.UDPTimeout != nil {
-		udpTimeout = *conf.UDPTimeout
+func New(ctx context.Context, logger *slog.Logger, srcNet, dstNet network.Network, conf *ForwarderConfig) (*Forwarder, error) {
+	conf, err := util.ConfigWithDefaults(conf, &defaultForwarderConf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to populate configuration with defaults: %w", err)
 	}
 
 	allowedDestinations := cidrs.NewTrieMap[struct{}]()
@@ -99,17 +96,28 @@ func New(ctx context.Context, logger *slog.Logger, net network.Network, conf *Fo
 
 	ctx, cancel := context.WithCancel(ctx)
 
-	return &Forwarder{
-		logger:              logger,
-		net:                 net,
+	fwd := &Forwarder{
 		ctx:                 ctx,
 		cancel:              cancel,
-		tcpSessionCounter:   semaphore.NewWeighted(int64(maxConcurrentTCP)),
-		udpSessionCounter:   semaphore.NewWeighted(int64(maxConcurrentUDP)),
-		udpTimeout:          udpTimeout,
+		logger:              logger,
+		dstNet:              dstNet,
+		tcpSessionCounter:   semaphore.NewWeighted(int64(*conf.MaxConcurrentTCP)),
+		udpSessionCounter:   semaphore.NewWeighted(int64(*conf.MaxConcurrentUDP)),
+		udpTimeout:          *conf.UDPTimeout,
 		allowedDestinations: allowedDestinations,
 		deniedDestinations:  deniedDestinations,
 	}
+
+	userspaceNet, ok := srcNet.(*network.UserspaceNetwork)
+	if !ok {
+		return nil, errors.New("source network must be userspace")
+	}
+
+	stack := userspaceNet.Stack()
+	fwd.tcpForwarder = tcp.NewForwarder(stack, 0, *conf.MaxInFlightTCPConnectionAttempts, fwd.tcpHandler)
+	fwd.udpForwarder = udp.NewForwarder(stack, fwd.udpHandler)
+
+	return fwd, nil
 }
 
 // Close closes the forwarder.
@@ -118,12 +126,88 @@ func (f *Forwarder) Close() error {
 	return nil
 }
 
+// ValidDestination checks if the destination address is valid for forwarding.
+func (f *Forwarder) ValidDestination(addr netip.Addr) bool {
+	_, allowed := f.allowedDestinations.Get(addr)
+	if allowed {
+		if _, denied := f.deniedDestinations.Get(addr); denied {
+			allowed = false
+		}
+	}
+
+	return allowed
+}
+
 // TCPProtocolHandler forwards TCP sessions.
-func (f *Forwarder) TCPProtocolHandler(req *tcp.ForwarderRequest) {
+func (f *Forwarder) TCPProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+	return f.tcpForwarder.HandlePacket(id, pkt)
+}
+
+// UDPProtocolHandler forwards UDP sessions.
+func (f *Forwarder) UDPProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+	return f.udpForwarder.HandlePacket(id, pkt)
+}
+
+// ICMPv4ProtocolHandler forwards ICMPv4 sessions.
+func (f *Forwarder) ICMPv4ProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+	hdr := header.ICMPv4(pkt.TransportHeader().Slice())
+	if len(hdr) < header.ICMPv4MinimumSize {
+		f.logger.Debug("Dropping invalid ICMPv4 packet")
+		return true
+	}
+
+	// Don't bother with checksums.
+
+	logger := f.logger.With(
+		slog.String("proto", "icmpv4"),
+		slog.String("src", id.RemoteAddress.String()),
+		slog.String("dst", id.LocalAddress.String()))
+
+	if hdr.Type() == header.ICMPv4Echo {
+		logger.Info("Received ICMPv4 echo request")
+
+		// TODO: Forward the packet (eg. shell out to ping)
+	} else {
+		logger.Debug("Ignoring ICMPv4 packet",
+			slog.Int("type", int(hdr.Type())))
+	}
+
+	// Ignore other ICMPv4 packets.
+	return true
+}
+
+// ICMPv6ProtocolHandler forwards ICMPv6 sessions.
+func (f *Forwarder) ICMPv6ProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+	hdr := header.ICMPv6(pkt.TransportHeader().Slice())
+	if len(hdr) < header.ICMPv6MinimumSize {
+		f.logger.Debug("Dropping invalid ICMPv6 packet")
+		return true
+	}
+
+	// Don't bother with checksums.
+
+	logger := f.logger.With(
+		slog.String("proto", "icmpv6"),
+		slog.String("src", id.RemoteAddress.String()),
+		slog.String("dst", id.LocalAddress.String()))
+
+	if hdr.Type() == header.ICMPv6EchoRequest {
+		logger.Info("Received ICMPv6 echo request")
+
+		// TODO: Forward the packet (eg. shell out to ping)
+	} else {
+		logger.Debug("Ignoring ICMPv6 packet",
+			slog.Int("type", int(hdr.Type())))
+	}
+
+	return true
+}
+
+func (f *Forwarder) tcpHandler(req *tcp.ForwarderRequest) {
 	reqDetails := req.ID()
 
-	srcAddrPort := addrPortFrom(reqDetails.RemoteAddress, reqDetails.RemotePort)
-	dstAddrPort := addrPortFrom(reqDetails.LocalAddress, reqDetails.LocalPort)
+	srcAddrPort := util.AddrPortFrom(reqDetails.RemoteAddress, reqDetails.RemotePort)
+	dstAddrPort := util.AddrPortFrom(reqDetails.LocalAddress, reqDetails.LocalPort)
 
 	logger := f.logger.With(
 		slog.String("proto", "tcp"),
@@ -182,7 +266,7 @@ func (f *Forwarder) TCPProtocolHandler(req *tcp.ForwarderRequest) {
 		defer local.Close()
 
 		// Connect to the destination.
-		remote, err := f.net.DialContext(ctx, "tcp", dstAddrPort.String())
+		remote, err := f.dstNet.DialContext(ctx, "tcp", dstAddrPort.String())
 		if err != nil {
 			logger.Error("Failed to dial destination", slog.Any("error", err))
 
@@ -203,12 +287,11 @@ func (f *Forwarder) TCPProtocolHandler(req *tcp.ForwarderRequest) {
 	}()
 }
 
-// UDPProtocolHandler forwards UDP sessions.
-func (f *Forwarder) UDPProtocolHandler(req *udp.ForwarderRequest) {
+func (f *Forwarder) udpHandler(req *udp.ForwarderRequest) {
 	reqDetails := req.ID()
 
-	srcAddrPort := addrPortFrom(reqDetails.RemoteAddress, reqDetails.RemotePort)
-	dstAddrPort := addrPortFrom(reqDetails.LocalAddress, reqDetails.LocalPort)
+	srcAddrPort := util.AddrPortFrom(reqDetails.RemoteAddress, reqDetails.RemotePort)
+	dstAddrPort := util.AddrPortFrom(reqDetails.LocalAddress, reqDetails.LocalPort)
 
 	logger := f.logger.With(
 		slog.String("proto", "udp"),
@@ -248,7 +331,7 @@ func (f *Forwarder) UDPProtocolHandler(req *udp.ForwarderRequest) {
 		local := gonet.NewUDPConn(&wq, ep)
 		defer local.Close()
 
-		remote, err := f.net.DialContext(ctx, "udp", dstAddrPort.String())
+		remote, err := f.dstNet.DialContext(ctx, "udp", dstAddrPort.String())
 		if err != nil {
 			logger.Error("Failed to dial destination", slog.Any("error", err))
 
@@ -263,25 +346,4 @@ func (f *Forwarder) UDPProtocolHandler(req *udp.ForwarderRequest) {
 			return
 		}
 	}()
-}
-
-// ValidDestination checks if the destination address is valid for forwarding.
-func (f *Forwarder) ValidDestination(addr netip.Addr) bool {
-	_, allowed := f.allowedDestinations.Get(addr)
-	if allowed {
-		if _, denied := f.deniedDestinations.Get(addr); denied {
-			allowed = false
-		}
-	}
-
-	return allowed
-}
-
-func addrPortFrom(addr tcpip.Address, port uint16) netip.AddrPort {
-	return netip.AddrPortFrom(addrFrom(addr), port)
-}
-
-func addrFrom(addr tcpip.Address) (netipAddr netip.Addr) {
-	netipAddr, _ = netip.AddrFromSlice(addr.AsSlice())
-	return netipAddr.Unmap()
 }

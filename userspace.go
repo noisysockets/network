@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/netip"
 	"os"
 	"strconv"
@@ -58,14 +59,17 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
 	"github.com/noisysockets/network/cidrs"
+	"github.com/noisysockets/network/internal/iptables/matcher"
+	"github.com/noisysockets/network/internal/iptables/target"
+	"github.com/noisysockets/network/internal/protocol"
+	"github.com/noisysockets/network/internal/util"
 	"github.com/noisysockets/resolver"
 	"golang.org/x/sync/errgroup"
 )
 
 const (
-	nicID                            = 1
-	outboundQueueSize                = 256
-	maxInFlightTCPConnectionAttempts = 16
+	nicID             = 1
+	outboundQueueSize = 256
 )
 
 var (
@@ -82,10 +86,6 @@ type UserspaceNetworkConfig struct {
 	Addresses []netip.Prefix
 	// ResolverFactory is an optional factory to create a DNS resolver.
 	ResolverFactory ResolverFactory
-	// DisableIPv4 disables IPv4 support.
-	DisableIPv4 bool
-	// DisableIPv6 disables IPv6 support.
-	DisableIPv6 bool
 	// PacketCaptureWriter is an optional writer to write a packet capture file to.
 	// If nil, no packet capture file will be written.
 	// This is useful for debugging network issues.
@@ -93,26 +93,28 @@ type UserspaceNetworkConfig struct {
 }
 
 type UserspaceNetwork struct {
-	logger       *slog.Logger
-	nic          Interface
-	hostname     string
-	domain       string
-	resolver     resolver.Resolver
-	stack        *stack.Stack
-	ep           *channel.Endpoint
-	notifyHandle *channel.NotificationHandle
-	outbound     chan *stack.PacketBuffer
-	tasks        *errgroup.Group
-	tasksCtx     context.Context
-	tasksCancel  context.CancelFunc
-	closeOnce    sync.Once
+	logger        *slog.Logger
+	nic           Interface
+	hostname      string
+	domain        string
+	localPrefixes *cidrs.TrieMap[struct{}]
+	resolver      resolver.Resolver
+	stack         *stack.Stack
+	ep            *channel.Endpoint
+	notifyHandle  *channel.NotificationHandle
+	outbound      chan *stack.PacketBuffer
+	tasks         *errgroup.Group
+	tasksCtx      context.Context
+	tasksCancel   context.CancelFunc
+	closeOnce     sync.Once
 }
 
 // Userspace returns a userspace Network implementation based on Netstack from
 // the gVisor project.
-func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *UserspaceNetworkConfig) (*UserspaceNetwork, error) {
-	if conf == nil {
-		conf = &UserspaceNetworkConfig{}
+func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf UserspaceNetworkConfig) (*UserspaceNetwork, error) {
+	localPrefixes := cidrs.NewTrieMap[struct{}]()
+	for _, addr := range conf.Addresses {
+		localPrefixes.Insert(addr, struct{}{})
 	}
 
 	stackOpts := stack.Options{
@@ -121,31 +123,35 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *Us
 			udp.NewProtocol,
 			icmp.NewProtocol4,
 			icmp.NewProtocol6,
+			// A hack to allow intercepting and forwarding ICMP packets.
+			protocol.NewProtocolForwardedICMPv4,
+			protocol.NewProtocolForwardedICMPv6,
 		},
-	}
-
-	if !conf.DisableIPv4 {
-		stackOpts.NetworkProtocols = append(stackOpts.NetworkProtocols, ipv4.NewProtocol)
-	}
-	if !conf.DisableIPv6 {
-		stackOpts.NetworkProtocols = append(stackOpts.NetworkProtocols, ipv6.NewProtocol)
+		NetworkProtocols: []stack.NetworkProtocolFactory{
+			ipv4.NewProtocol,
+			ipv6.NewProtocol,
+		},
+		DefaultIPTables: func(clock tcpip.Clock, rand *rand.Rand) *stack.IPTables {
+			return defaultIPTables(clock, rand, localPrefixes)
+		},
 	}
 
 	tasksCtx, tasksCancel := context.WithCancel(ctx)
 	tasks, tasksCtx := errgroup.WithContext(tasksCtx)
 
 	net := &UserspaceNetwork{
-		logger:      logger,
-		nic:         nic,
-		hostname:    conf.Hostname,
-		domain:      conf.Domain,
-		resolver:    resolver.IP(),
-		stack:       stack.New(stackOpts),
-		ep:          channel.New(outboundQueueSize, uint32(nic.MTU()), ""),
-		outbound:    make(chan *stack.PacketBuffer),
-		tasks:       tasks,
-		tasksCtx:    tasksCtx,
-		tasksCancel: tasksCancel,
+		logger:        logger,
+		nic:           nic,
+		hostname:      conf.Hostname,
+		domain:        conf.Domain,
+		localPrefixes: localPrefixes,
+		resolver:      resolver.IP(),
+		stack:         stack.New(stackOpts),
+		ep:            channel.New(outboundQueueSize, uint32(nic.MTU()), ""),
+		outbound:      make(chan *stack.PacketBuffer),
+		tasks:         tasks,
+		tasksCtx:      tasksCtx,
+		tasksCancel:   tasksCancel,
 	}
 
 	net.notifyHandle = net.ep.AddNotify(net)
@@ -179,14 +185,6 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *Us
 			pn = ipv6.ProtocolNumber
 		}
 
-		// Ignore the address if the protocol is disabled.
-		if conf.DisableIPv4 && pn == ipv4.ProtocolNumber {
-			continue
-		}
-		if conf.DisableIPv6 && pn == ipv6.ProtocolNumber {
-			continue
-		}
-
 		protocolAddress := tcpip.ProtocolAddress{
 			Protocol: pn,
 			AddressWithPrefix: tcpip.AddressWithPrefix{
@@ -201,24 +199,31 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf *Us
 	}
 
 	// Route all outbound packets to the NIC.
-	if !conf.DisableIPv4 {
-		net.stack.AddRoute(tcpip.Route{
+	net.stack.SetRouteTable([]tcpip.Route{
+		{
 			Destination: header.IPv4EmptySubnet,
 			NIC:         nicID,
-		})
-	}
-	if !conf.DisableIPv6 {
-		net.stack.AddRoute(tcpip.Route{
+		},
+		{
 			Destination: header.IPv6EmptySubnet,
 			NIC:         nicID,
-		})
-	}
+		},
+	})
 
 	// Begin copying packets to/from the NIC.
 	net.tasks.Go(net.copyInboundFromNIC)
 	net.tasks.Go(net.copyOutboundToNIC)
 
 	return net, nil
+}
+
+func (net *UserspaceNetwork) WriteNotify() {
+	pkt := net.ep.Read()
+	if pkt == nil {
+		return
+	}
+
+	net.outbound <- pkt
 }
 
 func (net *UserspaceNetwork) Close() error {
@@ -248,25 +253,21 @@ func (net *UserspaceNetwork) Close() error {
 	return err
 }
 
-func (net *UserspaceNetwork) WriteNotify() {
-	pkt := net.ep.Read()
-	if pkt == nil {
-		return
-	}
-
-	net.outbound <- pkt
+// Stack returns the underlying netstack stack.
+func (net *UserspaceNetwork) Stack() *stack.Stack {
+	return net.stack
 }
 
-// EnableForwarding enables forwarding of TCP and UDP packets using the provided
-// forwarder implementation.
-func (net *UserspaceNetwork) EnableForwarding(forwarder Forwarder) error {
+// EnableForwarding enables forwarding of network sessions using the provided
+// Forwarder implementation.
+func (net *UserspaceNetwork) EnableForwarding(fwd Forwarder) error {
 	// Allow outgoing packets to have a source address different from the address
 	// assigned to the NIC.
 	if err := net.stack.SetSpoofing(nicID, true); err != nil {
 		return fmt.Errorf("failed to enable spoofing: %v", err)
 	}
 
-	// Allows outgoing packets to have a destination address different from the
+	// Allows incoming packets to have a destination address different from the
 	// address assigned to the NIC.
 	if err := net.stack.SetPromiscuousMode(nicID, true); err != nil {
 		return fmt.Errorf("failed to enable promiscuous mode: %v", err)
@@ -274,49 +275,29 @@ func (net *UserspaceNetwork) EnableForwarding(forwarder Forwarder) error {
 
 	type packetHandler func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool
 
-	localPrefixes := cidrs.NewTrieMap[struct{}]()
-	for _, addr := range net.stack.AllAddresses()[nicID] {
-		localPrefixes.Insert(netip.MustParsePrefix(addr.AddressWithPrefix.String()), struct{}{})
-	}
-
+	// TODO: extract this out into a kind of packet handler muxer.
 	handlerForDestination := func(h packetHandler) packetHandler {
 		return func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
-			logger := net.logger.With(
-				slog.String("srcAddr", id.RemoteAddress.String()),
-				slog.String("dstAddr", id.LocalAddress.String()))
+			dstAddr := util.AddrFrom(id.LocalAddress)
 
-			logger.Debug("Received packet")
-
-			dstAddr, ok := netip.AddrFromSlice(id.LocalAddress.AsSlice())
-			if !ok {
-				logger.Debug("Failed to parse destination address")
-				return false
-			}
-
-			if _, ok := localPrefixes.Get(dstAddr); ok {
+			if _, ok := net.localPrefixes.Get(dstAddr); ok {
 				// Not handled by the forwarder (local traffic).
-				logger.Debug("Not forwarding local traffic")
 				return false
 			}
 
-			if !forwarder.ValidDestination(dstAddr) {
+			if !fwd.ValidDestination(dstAddr) {
 				// Not handled by the forwarder.
-				logger.Debug("Not forwarding traffic to invalid destination")
 				return false
 			}
-
-			logger.Debug("Forwarding packet")
 
 			return h(id, pkt)
 		}
 	}
 
-	// Forward TCP and UDP packets.
-	tcpFwd := tcp.NewForwarder(net.stack, 0, maxInFlightTCPConnectionAttempts, forwarder.TCPProtocolHandler)
-	net.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, handlerForDestination(tcpFwd.HandlePacket))
-
-	udpFwd := udp.NewForwarder(net.stack, forwarder.UDPProtocolHandler)
-	net.stack.SetTransportProtocolHandler(udp.ProtocolNumber, handlerForDestination(udpFwd.HandlePacket))
+	net.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, handlerForDestination(fwd.TCPProtocolHandler))
+	net.stack.SetTransportProtocolHandler(udp.ProtocolNumber, handlerForDestination(fwd.UDPProtocolHandler))
+	net.stack.SetTransportProtocolHandler(protocol.ForwardedICMPv4ProtocolNumber, handlerForDestination(fwd.ICMPv4ProtocolHandler))
+	net.stack.SetTransportProtocolHandler(protocol.ForwardedICMPv6ProtocolNumber, handlerForDestination(fwd.ICMPv6ProtocolHandler))
 
 	return nil
 }
@@ -718,6 +699,85 @@ func (net *UserspaceNetwork) bindAddress(host string, useIPV4, useIPV6 bool) (ad
 	}
 
 	return addr, nil
+}
+
+// By default it is not possible to intercept and forward ICMP packets within netstack.
+// This is due to ICMP dispatching occuring at lower layer in the network stack.
+// We use iptables to implement a workaround which involves rewriting the ICMP protocol
+// number and passing it to the stack (where we subsequently catch and forward it).
+func defaultIPTables(clock tcpip.Clock, rand *rand.Rand, localPrefixes *cidrs.TrieMap[struct{}]) *stack.IPTables {
+	const (
+		RewriteICMPRule = iota
+		AllowRule
+	)
+
+	nonLocal := matcher.Not(matcher.Destination(localPrefixes))
+
+	ipV4FilterTable := stack.Table{
+		Rules: []stack.Rule{
+			// RewriteICMPRule
+			{
+				Filter: stack.IPHeaderFilter{
+					Protocol:      header.ICMPv4ProtocolNumber,
+					CheckProtocol: true,
+				},
+				Matchers: []stack.Matcher{nonLocal},
+				Target:   target.RewriteTransportProtocol(protocol.ForwardedICMPv4ProtocolNumber),
+			},
+			// AllowRule
+			{Target: &stack.AcceptTarget{NetworkProtocol: header.IPv4ProtocolNumber}},
+		},
+		BuiltinChains: [stack.NumHooks]int{
+			stack.Prerouting:  AllowRule,
+			stack.Input:       RewriteICMPRule,
+			stack.Forward:     AllowRule,
+			stack.Output:      AllowRule,
+			stack.Postrouting: AllowRule,
+		},
+		Underflows: [stack.NumHooks]int{
+			stack.Prerouting:  stack.HookUnset,
+			stack.Input:       stack.HookUnset,
+			stack.Forward:     stack.HookUnset,
+			stack.Output:      stack.HookUnset,
+			stack.Postrouting: stack.HookUnset,
+		},
+	}
+
+	ipV6FilterTable := stack.Table{
+		Rules: []stack.Rule{
+			// RewriteICMPRule
+			{
+				Filter: stack.IPHeaderFilter{
+					Protocol:      header.ICMPv6ProtocolNumber,
+					CheckProtocol: true,
+				},
+				Matchers: []stack.Matcher{nonLocal},
+				Target:   target.RewriteTransportProtocol(protocol.ForwardedICMPv6ProtocolNumber),
+			},
+			// AllowRule
+			{Target: &stack.AcceptTarget{NetworkProtocol: header.IPv6ProtocolNumber}},
+		},
+		BuiltinChains: [stack.NumHooks]int{
+			stack.Prerouting:  AllowRule,
+			stack.Input:       RewriteICMPRule,
+			stack.Forward:     AllowRule,
+			stack.Output:      AllowRule,
+			stack.Postrouting: AllowRule,
+		},
+		Underflows: [stack.NumHooks]int{
+			stack.Prerouting:  stack.HookUnset,
+			stack.Input:       stack.HookUnset,
+			stack.Forward:     stack.HookUnset,
+			stack.Output:      stack.HookUnset,
+			stack.Postrouting: stack.HookUnset,
+		},
+	}
+
+	tables := stack.DefaultTables(clock, rand)
+	tables.ReplaceTable(stack.FilterID, ipV4FilterTable, false)
+	tables.ReplaceTable(stack.FilterID, ipV6FilterTable, true)
+
+	return tables
 }
 
 func convertToFullAddr(nicID tcpip.NICID, addrPort netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
