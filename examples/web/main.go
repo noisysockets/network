@@ -18,10 +18,11 @@
  * For example:
  *
  *	$ sudo ip addr add 100.64.0.2/24 dev nsh0
+ *  $ sudo ip addr add fdff:7061:ac89::2/64 dev nsh0
  *	$ sudo ip link set dev nsh0 up
  *
- * You can then access the HTTP server by visiting http://100.64.0.1 in your
- * web browser.
+ * You can then access the HTTP server by visiting http://100.64.0.1 or
+ * http://[fdff:7061:ac89::1] in your web browser.
  */
 package main
 
@@ -63,6 +64,7 @@ func main() {
 		Hostname: "demo",
 		Addresses: []netip.Prefix{
 			netip.MustParsePrefix("100.64.0.1/32"),
+			netip.MustParsePrefix("fdff:7061:ac89::1/128"),
 		},
 	})
 	if err != nil {

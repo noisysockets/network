@@ -20,7 +20,8 @@ import (
 	"github.com/noisysockets/resolver"
 )
 
-// Network is an interface that abstracts the standard library's network operations.
+// Network is an interface that abstracts a superset of the standard library's
+// network operations.
 type Network interface {
 	io.Closer
 	// Hostname returns the hostname of the local machine.
@@ -45,13 +46,16 @@ type Network interface {
 	// ListenPacket listens for incoming packets addressed to the local address.
 	// Known networks are "udp", "udp4" (IPv4-only), "udp6" (IPv6-only).
 	ListenPacket(network, address string) (stdnet.PacketConn, error)
+	// Ping sends an ICMP echo request to the given host.
+	// Network must be "ip", "ip4" (IPv4-only), "ip6" (IPv6-only).
+	Ping(ctx context.Context, network, host string) error
 }
 
 // DialContextFunc is a function that dials a network address using a context.
 type DialContextFunc func(ctx context.Context, network, address string) (stdnet.Conn, error)
 
 // ResolverFactory is a function that creates a DNS resolver from the given dial function.
-type ResolverFactory func(dialContext DialContextFunc) resolver.Resolver
+type ResolverFactory func(dialContext DialContextFunc) (resolver.Resolver, error)
 
 // Forwarders can be used to forward network sessions to another network.
 type Forwarder interface {

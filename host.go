@@ -17,18 +17,21 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/noisysockets/go-fqdn"
+	"github.com/noisysockets/pinger"
 )
 
-var (
-	// Ensure that HostNetwork implements Network interface.
-	_ Network = (*HostNetwork)(nil)
-)
+// Ensure that HostNetwork implements Network interface.
+var _ Network = (*HostNetwork)(nil)
 
-type HostNetwork struct{}
+type HostNetwork struct {
+	pinger *pinger.Pinger
+}
 
 // Host returns a Network implementation that uses the standard library's network operations.
 func Host() *HostNetwork {
-	return &HostNetwork{}
+	return &HostNetwork{
+		pinger: pinger.New(),
+	}
 }
 
 func (net *HostNetwork) Close() error {
@@ -80,4 +83,8 @@ func (net *HostNetwork) Listen(network, address string) (stdnet.Listener, error)
 
 func (net *HostNetwork) ListenPacket(network, address string) (stdnet.PacketConn, error) {
 	return stdnet.ListenPacket(network, address)
+}
+
+func (net *HostNetwork) Ping(ctx context.Context, network, host string) error {
+	return net.pinger.Ping(ctx, network, host)
 }

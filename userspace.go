@@ -63,6 +63,7 @@ import (
 	"github.com/noisysockets/network/internal/iptables/target"
 	"github.com/noisysockets/network/internal/protocol"
 	"github.com/noisysockets/network/internal/util"
+	"github.com/noisysockets/pinger"
 	"github.com/noisysockets/resolver"
 	"golang.org/x/sync/errgroup"
 )
@@ -107,6 +108,7 @@ type UserspaceNetwork struct {
 	tasksCtx      context.Context
 	tasksCancel   context.CancelFunc
 	closeOnce     sync.Once
+	pinger        *pinger.Pinger
 }
 
 // Userspace returns a userspace Network implementation based on Netstack from
@@ -156,8 +158,18 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 
 	net.notifyHandle = net.ep.AddNotify(net)
 
+	net.pinger = pinger.New(
+		pinger.WithLogger(logger),
+		pinger.WithPacketConnFactory(net.newICMPPacketConn),
+	)
+
 	if conf.ResolverFactory != nil {
-		net.resolver = conf.ResolverFactory(net.DialContext)
+		var err error
+		net.resolver, err = conf.ResolverFactory(net.DialContext)
+		if err != nil {
+			_ = net.Close()
+			return nil, fmt.Errorf("failed to create resolver: %v", err)
+		}
 	}
 
 	var ep stack.LinkEndpoint = net.ep
@@ -650,7 +662,11 @@ func (net *UserspaceNetwork) ListenPacket(network, address string) (stdnet.Packe
 	return gonet.DialUDP(net.stack, &fa, nil, pn)
 }
 
-// TODO: binding to both IPv4 and IPv6 / multiple addresses.
+func (net *UserspaceNetwork) Ping(ctx context.Context, network, host string) error {
+	return net.pinger.Ping(ctx, network, host)
+}
+
+// TODO: binding to both IPv4 and IPv6 / multiple addresses?
 func (net *UserspaceNetwork) bindAddress(host string, useIPV4, useIPV6 bool) (addr netip.Addr, err error) {
 	allNICAddrs := net.stack.AllAddresses()[nicID]
 

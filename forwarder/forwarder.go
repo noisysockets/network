@@ -5,9 +5,25 @@
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * Portions of this file are based on code originally from gVisor,
+ *
+ * Copyright 2018 The gVisor Authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
-// Package forwarder provides a TCP and UDP session forwarder.
+// Package forwarder provides a network session forwarder.
 package forwarder
 
 import (
@@ -20,16 +36,21 @@ import (
 	"time"
 
 	"github.com/noisysockets/contextio"
+	"github.com/noisysockets/netstack/pkg/buffer"
+	"github.com/noisysockets/netstack/pkg/tcpip"
 	"github.com/noisysockets/netstack/pkg/tcpip/adapters/gonet"
+	"github.com/noisysockets/netstack/pkg/tcpip/checksum"
 	"github.com/noisysockets/netstack/pkg/tcpip/header"
+	"github.com/noisysockets/netstack/pkg/tcpip/network/ipv4"
+	"github.com/noisysockets/netstack/pkg/tcpip/network/ipv6"
 	"github.com/noisysockets/netstack/pkg/tcpip/stack"
+	"github.com/noisysockets/netstack/pkg/tcpip/transport/icmp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
 	"github.com/noisysockets/netstack/pkg/waiter"
 	"github.com/noisysockets/network"
 	"github.com/noisysockets/network/cidrs"
 	"github.com/noisysockets/network/internal/util"
-	"golang.org/x/sync/semaphore"
 )
 
 var _ network.Forwarder = (*Forwarder)(nil)
@@ -40,14 +61,12 @@ type ForwarderConfig struct {
 	AllowedDestinations []netip.Prefix
 	// Denied destination prefixes.
 	DeniedDestinations []netip.Prefix
-	// Maximum number of in-flight TCP connection attempts.
-	MaxInFlightTCPConnectionAttempts *int
-	// Maximum number of concurrent TCP sessions.
-	MaxConcurrentTCP *int
-	// Maximum number of concurrent UDP sessions.
-	MaxConcurrentUDP *int
+	// Maximum number of in-flight TCP connections.
+	MaxInFlightTCPConnections *int
 	// How long to wait for activity on a UDP session before considering it	dead.
-	UDPTimeout *time.Duration
+	UDPIdleTimeout *time.Duration
+	// How long to wait for an ICMP echo reply before considering it timed out.
+	PingTimeout *time.Duration
 }
 
 // Default values (if not set).
@@ -57,10 +76,9 @@ var defaultForwarderConf = ForwarderConfig{
 		netip.MustParsePrefix("127.0.0.0/8"),
 		netip.MustParsePrefix("::1/128"),
 	},
-	MaxInFlightTCPConnectionAttempts: util.PointerTo(16),
-	MaxConcurrentTCP:                 util.PointerTo(1024),
-	MaxConcurrentUDP:                 util.PointerTo(1024),
-	UDPTimeout:                       util.PointerTo(30 * time.Second),
+	MaxInFlightTCPConnections: util.PointerTo(2048), // TODO: tune this.
+	UDPIdleTimeout:            util.PointerTo(30 * time.Second),
+	PingTimeout:               util.PointerTo(30 * time.Second),
 }
 
 // Forwarder is a network session forwarder.
@@ -68,20 +86,25 @@ type Forwarder struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	logger              *slog.Logger
+	srcStack            *stack.Stack
 	dstNet              network.Network
 	tcpForwarder        *tcp.Forwarder
 	udpForwarder        *udp.Forwarder
-	tcpSessionCounter   *semaphore.Weighted
-	udpSessionCounter   *semaphore.Weighted
-	udpTimeout          time.Duration
 	allowedDestinations *cidrs.TrieMap[struct{}]
 	deniedDestinations  *cidrs.TrieMap[struct{}]
+	udpIdleTimeout      time.Duration
+	pingTimeout         time.Duration
 }
 
 func New(ctx context.Context, logger *slog.Logger, srcNet, dstNet network.Network, conf *ForwarderConfig) (*Forwarder, error) {
 	conf, err := util.ConfigWithDefaults(conf, &defaultForwarderConf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to populate configuration with defaults: %w", err)
+	}
+
+	userspaceNet, ok := srcNet.(*network.UserspaceNetwork)
+	if !ok {
+		return nil, errors.New("expected userspace source network")
 	}
 
 	allowedDestinations := cidrs.NewTrieMap[struct{}]()
@@ -100,22 +123,16 @@ func New(ctx context.Context, logger *slog.Logger, srcNet, dstNet network.Networ
 		ctx:                 ctx,
 		cancel:              cancel,
 		logger:              logger,
+		srcStack:            userspaceNet.Stack(),
 		dstNet:              dstNet,
-		tcpSessionCounter:   semaphore.NewWeighted(int64(*conf.MaxConcurrentTCP)),
-		udpSessionCounter:   semaphore.NewWeighted(int64(*conf.MaxConcurrentUDP)),
-		udpTimeout:          *conf.UDPTimeout,
 		allowedDestinations: allowedDestinations,
 		deniedDestinations:  deniedDestinations,
+		udpIdleTimeout:      *conf.UDPIdleTimeout,
+		pingTimeout:         *conf.PingTimeout,
 	}
 
-	userspaceNet, ok := srcNet.(*network.UserspaceNetwork)
-	if !ok {
-		return nil, errors.New("source network must be userspace")
-	}
-
-	stack := userspaceNet.Stack()
-	fwd.tcpForwarder = tcp.NewForwarder(stack, 0, *conf.MaxInFlightTCPConnectionAttempts, fwd.tcpHandler)
-	fwd.udpForwarder = udp.NewForwarder(stack, fwd.udpHandler)
+	fwd.tcpForwarder = tcp.NewForwarder(fwd.srcStack, 0, *conf.MaxInFlightTCPConnections, fwd.tcpHandler)
+	fwd.udpForwarder = udp.NewForwarder(fwd.srcStack, fwd.udpHandler)
 
 	return fwd, nil
 }
@@ -150,55 +167,114 @@ func (f *Forwarder) UDPProtocolHandler(id stack.TransportEndpointID, pkt *stack.
 
 // ICMPv4ProtocolHandler forwards ICMPv4 sessions.
 func (f *Forwarder) ICMPv4ProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
-	hdr := header.ICMPv4(pkt.TransportHeader().Slice())
-	if len(hdr) < header.ICMPv4MinimumSize {
-		f.logger.Debug("Dropping invalid ICMPv4 packet")
-		return true
-	}
+	go func() {
+		defer pkt.DecRef()
 
-	// Don't bother with checksums.
+		ipHdr := header.IPv4(pkt.NetworkHeader().Slice())
+		if len(ipHdr) < header.IPv4MinimumSize {
+			f.logger.Debug("Dropping invalid IPv4 packet")
+			return
+		}
 
-	logger := f.logger.With(
-		slog.String("proto", "icmpv4"),
-		slog.String("src", id.RemoteAddress.String()),
-		slog.String("dst", id.LocalAddress.String()))
+		// Fix up our rewritten protocol number.
+		// See: rewrite_transport_protocol.go
+		ipHdr[9] = uint8(icmp.ProtocolNumber4)
 
-	if hdr.Type() == header.ICMPv4Echo {
-		logger.Info("Received ICMPv4 echo request")
+		hdr := header.ICMPv4(pkt.TransportHeader().Slice())
+		if len(hdr) < header.ICMPv4MinimumSize {
+			f.logger.Debug("Dropping invalid ICMPv4 packet")
+			return
+		}
 
-		// TODO: Forward the packet (eg. shell out to ping)
-	} else {
-		logger.Debug("Ignoring ICMPv4 packet",
-			slog.Int("type", int(hdr.Type())))
-	}
+		// checksums?
 
-	// Ignore other ICMPv4 packets.
+		logger := f.logger.With(
+			slog.String("proto", "icmp4"),
+			slog.String("src", id.RemoteAddress.String()),
+			slog.String("dst", id.LocalAddress.String()))
+
+		defer logger.Debug("Session finished")
+
+		if hdr.Type() == header.ICMPv4Echo {
+			logger.Info("Forwarding echo request")
+
+			ctx, cancel := context.WithTimeout(f.ctx, f.pingTimeout)
+			defer cancel()
+
+			dstAddr := util.AddrFrom(id.LocalAddress)
+
+			if err := f.dstNet.Ping(ctx, "ip4", dstAddr.String()); err != nil {
+				logger.Debug("Failed to ping destination", slog.Any("error", err))
+				// TODO: if the destination is unreachable, send an ICMPv4 unreachable message.
+				return
+			}
+
+			f.logger.Debug("Sending ICMPv4 echo reply")
+
+			if err := f.sendICMPv4EchoReply(pkt); err != nil {
+				logger.Warn("Failed to send echo reply", slog.Any("error", err))
+			}
+		} else {
+			logger.Debug("Ignoring packet", slog.Int("type", int(hdr.Type())))
+		}
+	}()
+
 	return true
 }
 
 // ICMPv6ProtocolHandler forwards ICMPv6 sessions.
 func (f *Forwarder) ICMPv6ProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
-	hdr := header.ICMPv6(pkt.TransportHeader().Slice())
-	if len(hdr) < header.ICMPv6MinimumSize {
-		f.logger.Debug("Dropping invalid ICMPv6 packet")
-		return true
-	}
+	go func() {
+		defer pkt.DecRef()
 
-	// Don't bother with checksums.
+		ipHdr := header.IPv6(pkt.NetworkHeader().Slice())
+		if len(ipHdr) < header.IPv6MinimumSize {
+			f.logger.Debug("Dropping invalid IPv6 packet")
+			return
+		}
 
-	logger := f.logger.With(
-		slog.String("proto", "icmpv6"),
-		slog.String("src", id.RemoteAddress.String()),
-		slog.String("dst", id.LocalAddress.String()))
+		// Fix up our rewritten protocol number.
+		// See: rewrite_transport_protocol.go
+		ipHdr[6] = uint8(icmp.ProtocolNumber6)
 
-	if hdr.Type() == header.ICMPv6EchoRequest {
-		logger.Info("Received ICMPv6 echo request")
+		hdr := header.ICMPv6(pkt.TransportHeader().Slice())
+		if len(hdr) < header.ICMPv6MinimumSize {
+			f.logger.Debug("Dropping invalid ICMPv6 packet")
+			return
+		}
 
-		// TODO: Forward the packet (eg. shell out to ping)
-	} else {
-		logger.Debug("Ignoring ICMPv6 packet",
-			slog.Int("type", int(hdr.Type())))
-	}
+		// checksums?
+
+		logger := f.logger.With(
+			slog.String("proto", "icmp6"),
+			slog.String("src", id.RemoteAddress.String()),
+			slog.String("dst", id.LocalAddress.String()))
+
+		defer logger.Debug("Session finished")
+
+		if hdr.Type() == header.ICMPv6EchoRequest {
+			logger.Info("Forwarding echo request")
+
+			ctx, cancel := context.WithTimeout(f.ctx, f.pingTimeout)
+			defer cancel()
+
+			dstAddr := util.AddrFrom(id.LocalAddress)
+
+			if err := f.dstNet.Ping(ctx, "ip6", dstAddr.String()); err != nil {
+				logger.Debug("Failed to ping destination", slog.Any("error", err))
+				// TODO: if the destination is unreachable, send an ICMPv6 unreachable message.
+				return
+			}
+
+			f.logger.Debug("Sending ICMPv6 echo reply")
+
+			if err := f.sendICMPv6EchoReply(pkt); err != nil {
+				logger.Warn("Failed to send echo reply", slog.Any("error", err))
+			}
+		} else {
+			logger.Debug("Ignoring packet", slog.Int("type", int(hdr.Type())))
+		}
+	}()
 
 	return true
 }
@@ -223,13 +299,6 @@ func (f *Forwarder) tcpHandler(req *tcp.ForwarderRequest) {
 	go func() {
 		ctx, cancel := context.WithCancel(f.ctx)
 		defer cancel()
-
-		if ok := f.tcpSessionCounter.TryAcquire(1); !ok {
-			logger.Warn("Forwarder at capacity, rejecting session")
-			req.Complete(true)
-			return
-		}
-		defer f.tcpSessionCounter.Release(1)
 
 		logger.Debug("Forwarding session")
 		defer logger.Debug("Session finished")
@@ -268,7 +337,7 @@ func (f *Forwarder) tcpHandler(req *tcp.ForwarderRequest) {
 		// Connect to the destination.
 		remote, err := f.dstNet.DialContext(ctx, "tcp", dstAddrPort.String())
 		if err != nil {
-			logger.Error("Failed to dial destination", slog.Any("error", err))
+			logger.Warn("Failed to dial destination", slog.Any("error", err))
 
 			req.Complete(true)
 			return
@@ -277,7 +346,7 @@ func (f *Forwarder) tcpHandler(req *tcp.ForwarderRequest) {
 
 		// Start forwarding.
 		if _, err := contextio.SpliceContext(ctx, local, remote, nil); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("Failed to forward session", slog.Any("error", err))
+			logger.Warn("Failed to forward session", slog.Any("error", err))
 
 			req.Complete(true)
 			return
@@ -303,11 +372,6 @@ func (f *Forwarder) udpHandler(req *udp.ForwarderRequest) {
 		return
 	}
 
-	if ok := f.udpSessionCounter.TryAcquire(1); !ok {
-		logger.Warn("Forwarder at capacity, rejecting session")
-		return
-	}
-
 	// Create endpoint as quickly as possible to avoid UDP race conditions, when
 	// multiple frames are in flight.
 	var wq waiter.Queue
@@ -320,30 +384,159 @@ func (f *Forwarder) udpHandler(req *udp.ForwarderRequest) {
 	}
 
 	go func() {
-		defer f.udpSessionCounter.Release(1)
-
-		ctx, cancel := context.WithCancel(f.ctx)
-		defer cancel()
-
 		logger.Debug("Forwarding session")
 		defer logger.Debug("Session finished")
 
 		local := gonet.NewUDPConn(&wq, ep)
 		defer local.Close()
 
-		remote, err := f.dstNet.DialContext(ctx, "udp", dstAddrPort.String())
+		remote, err := f.dstNet.DialContext(f.ctx, "udp", dstAddrPort.String())
 		if err != nil {
-			logger.Error("Failed to dial destination", slog.Any("error", err))
+			logger.Warn("Failed to dial destination", slog.Any("error", err))
 
 			return
 		}
 		defer remote.Close()
 
-		if _, err := contextio.SpliceContext(ctx, local, remote, &f.udpTimeout); err != nil &&
+		if _, err := contextio.SpliceContext(f.ctx, local, remote, &f.udpIdleTimeout); err != nil &&
 			!(errors.Is(err, context.Canceled) || errors.Is(err, os.ErrDeadlineExceeded)) {
-			logger.Error("Failed to forward session", slog.Any("error", err))
+			logger.Warn("Failed to forward session", slog.Any("error", err))
 
 			return
 		}
 	}()
+}
+
+func (f *Forwarder) sendICMPv4EchoReply(pkt *stack.PacketBuffer) error {
+	replyData := stack.PayloadSince(pkt.TransportHeader())
+	defer replyData.Release()
+
+	ipHdr := header.IPv4(pkt.NetworkHeader().Slice())
+	localAddressBroadcast := pkt.NetworkPacketInfo.LocalAddressBroadcast
+
+	// As per RFC 1122 section 3.2.1.3, when a host sends any datagram, the IP
+	// source address MUST be one of its own IP addresses (but not a broadcast
+	// or multicast address).
+	localAddr := ipHdr.DestinationAddress()
+	if localAddressBroadcast || header.IsV4MulticastAddress(localAddr) {
+		localAddr = tcpip.Address{}
+	}
+
+	r, err := f.srcStack.FindRoute(pkt.NICID, localAddr, ipHdr.SourceAddress(), ipv4.ProtocolNumber, false /* multicastLoop */)
+	if err != nil {
+		return fmt.Errorf("failed to find route: %v", err)
+	}
+	defer r.Release()
+
+	// Because IP and ICMP are so closely intertwined, we need to handcraft our
+	// IP header to be able to follow RFC 792. The wording on page 13 is as
+	// follows:
+	//   IP Fields:
+	//   Addresses
+	//     The address of the source in an echo message will be the
+	//     destination of the echo reply message.  To form an echo reply
+	//     message, the source and destination addresses are simply reversed,
+	//     the type code changed to 0, and the checksum recomputed.
+	//
+	// This was interpreted by early implementors to mean that all options must
+	// be copied from the echo request IP header to the echo reply IP header
+	// and this behaviour is still relied upon by some applications.
+	//
+	// Create a copy of the IP header we received, options and all, and change
+	// The fields we need to alter.
+	//
+	// We need to produce the entire packet in the data segment in order to
+	// use WriteHeaderIncludedPacket(). WriteHeaderIncludedPacket sets the
+	// total length and the header checksum so we don't need to set those here.
+	//
+	// Take the base of the incoming request IP header but replace the options.
+	ipOptions := ipHdr.Options()
+	replyHeaderLength := uint8(header.IPv4MinimumSize + len(ipOptions))
+	replyIPHdrView := buffer.NewView(int(replyHeaderLength))
+	_, _ = replyIPHdrView.Write(ipHdr[:header.IPv4MinimumSize])
+	_, _ = replyIPHdrView.Write(ipOptions)
+	replyIPHdr := header.IPv4(replyIPHdrView.AsSlice())
+	replyIPHdr.SetHeaderLength(replyHeaderLength)
+	replyIPHdr.SetSourceAddress(r.LocalAddress())
+	replyIPHdr.SetDestinationAddress(r.RemoteAddress())
+	replyIPHdr.SetTTL(r.DefaultTTL())
+	replyIPHdr.SetTotalLength(uint16(len(replyIPHdr) + len(replyData.AsSlice())))
+	replyIPHdr.SetChecksum(0)
+	replyIPHdr.SetChecksum(^replyIPHdr.CalculateChecksum())
+
+	replyICMPHdr := header.ICMPv4(replyData.AsSlice())
+	replyICMPHdr.SetType(header.ICMPv4EchoReply)
+	replyICMPHdr.SetChecksum(0)
+	replyICMPHdr.SetChecksum(^checksum.Checksum(replyData.AsSlice(), 0))
+
+	replyBuf := buffer.MakeWithView(replyIPHdrView)
+	_ = replyBuf.Append(replyData.Clone())
+	replyPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		ReserveHeaderBytes: int(r.MaxHeaderLength()),
+		Payload:            replyBuf,
+	})
+	defer replyPkt.DecRef()
+
+	if err := r.WriteHeaderIncludedPacket(replyPkt); err != nil {
+		return fmt.Errorf("failed to write packet: %v", err)
+	}
+
+	return nil
+}
+
+func (f *Forwarder) sendICMPv6EchoReply(pkt *stack.PacketBuffer) error {
+	icmpHdr := header.ICMPv6(pkt.TransportHeader().Slice())
+	if len(icmpHdr) < header.ICMPv6MinimumSize {
+		return errors.New("ICMPv6 packet too short")
+	}
+
+	ipHdr := header.IPv6(pkt.NetworkHeader().Slice())
+	srcAddr := ipHdr.SourceAddress()
+	dstAddr := ipHdr.DestinationAddress()
+
+	// As per RFC 4291 section 2.7, multicast addresses must not be used as
+	// source addresses in IPv6 packets.
+	localAddr := dstAddr
+	if header.IsV6MulticastAddress(dstAddr) {
+		localAddr = tcpip.Address{}
+	}
+
+	r, err := f.srcStack.FindRoute(pkt.NICID, localAddr, srcAddr, ipv6.ProtocolNumber, false /* multicastLoop */)
+	if err != nil {
+		return fmt.Errorf("failed to find route: %v", err)
+	}
+	defer r.Release()
+
+	replyPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		ReserveHeaderBytes: int(r.MaxHeaderLength()) + header.ICMPv6EchoMinimumSize,
+		Payload:            pkt.Data().ToBuffer(),
+	})
+	defer replyPkt.DecRef()
+
+	replyICMPHdr := header.ICMPv6(replyPkt.TransportHeader().Push(header.ICMPv6EchoMinimumSize))
+	replyPkt.TransportProtocolNumber = icmp.ProtocolNumber6
+	copy(replyICMPHdr, icmpHdr)
+	replyICMPHdr.SetType(header.ICMPv6EchoReply)
+	replyData := replyPkt.Data()
+	replyICMPHdr.SetChecksum(header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
+		Header:      replyICMPHdr,
+		Src:         r.LocalAddress(),
+		Dst:         r.RemoteAddress(),
+		PayloadCsum: replyData.Checksum(),
+		PayloadLen:  replyData.Size(),
+	}))
+	replyTClass, _ := ipHdr.TOS()
+
+	if err := r.WritePacket(stack.NetworkHeaderParams{
+		Protocol: header.ICMPv6ProtocolNumber,
+		TTL:      r.DefaultTTL(),
+		// Even though RFC 4443 does not mention anything about it, Linux uses the
+		// TrafficClass of the received echo request when replying.
+		// https://github.com/torvalds/linux/blob/0280e3c58f9/net/ipv6/icmp.c#L797
+		TOS: replyTClass,
+	}, replyPkt); err != nil {
+		return fmt.Errorf("failed to write packet: %v", err)
+	}
+
+	return nil
 }

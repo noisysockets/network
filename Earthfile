@@ -17,6 +17,8 @@ lint:
   RUN golangci-lint run --timeout 5m ./...
 
 test:
+  # We need a ping SUID binary to run the tests.
+  RUN apt update && apt install -y iputils-ping
   COPY go.mod go.sum .
   RUN go mod download
   COPY . .
