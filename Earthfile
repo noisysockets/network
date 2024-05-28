@@ -22,6 +22,7 @@ test:
   COPY go.mod go.sum .
   RUN go mod download
   COPY . .
+  ARG GITHUB_ACTIONS=false
   RUN go test -coverprofile=coverage.out -v ./...
   SAVE ARTIFACT coverage.out AS LOCAL coverage.out
   BUILD +examples

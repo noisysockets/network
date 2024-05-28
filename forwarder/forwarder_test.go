@@ -147,6 +147,8 @@ func TestForwarder(t *testing.T) {
 	})
 
 	t.Run("ICMPv4", func(t *testing.T) {
+		testutil.EnsureNotGitHubActions(t)
+
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 
@@ -155,6 +157,7 @@ func TestForwarder(t *testing.T) {
 	})
 
 	t.Run("ICMPv6", func(t *testing.T) {
+		testutil.EnsureNotGitHubActions(t)
 		testutil.EnsureIPv6(t)
 
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
