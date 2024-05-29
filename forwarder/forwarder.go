@@ -300,7 +300,7 @@ func (f *Forwarder) tcpHandler(req *tcp.ForwarderRequest) {
 		ctx, cancel := context.WithCancel(f.ctx)
 		defer cancel()
 
-		logger.Debug("Forwarding session")
+		logger.Info("Forwarding session")
 		defer logger.Debug("Session finished")
 
 		var wq waiter.Queue
@@ -384,7 +384,7 @@ func (f *Forwarder) udpHandler(req *udp.ForwarderRequest) {
 	}
 
 	go func() {
-		logger.Debug("Forwarding session")
+		logger.Info("Forwarding session")
 		defer logger.Debug("Session finished")
 
 		local := gonet.NewUDPConn(&wq, ep)
