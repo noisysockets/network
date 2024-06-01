@@ -35,6 +35,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	stdnet "net"
 	"net/netip"
 	"os"
@@ -65,7 +66,7 @@ func (net *UserspaceNetwork) newICMPPacketConn(network string) (stdnet.PacketCon
 
 	pc := icmpPacketConn{
 		network:  network,
-		deadline: time.NewTimer(-1),
+		deadline: time.NewTimer(math.MaxInt64),
 	}
 
 	var pn tcpip.NetworkProtocolNumber

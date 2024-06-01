@@ -58,7 +58,7 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/icmp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
-	"github.com/noisysockets/network/cidrs"
+	"github.com/noisysockets/netutil/cidrs"
 	"github.com/noisysockets/network/internal/iptables/matcher"
 	"github.com/noisysockets/network/internal/iptables/target"
 	"github.com/noisysockets/network/internal/protocol"

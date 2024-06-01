@@ -48,8 +48,8 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
 	"github.com/noisysockets/netstack/pkg/waiter"
+	"github.com/noisysockets/netutil/cidrs"
 	"github.com/noisysockets/network"
-	"github.com/noisysockets/network/cidrs"
 	"github.com/noisysockets/network/internal/util"
 )
 

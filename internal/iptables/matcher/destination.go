@@ -14,7 +14,7 @@ import (
 
 	"github.com/noisysockets/netstack/pkg/tcpip/header"
 	"github.com/noisysockets/netstack/pkg/tcpip/stack"
-	"github.com/noisysockets/network/cidrs"
+	"github.com/noisysockets/netutil/cidrs"
 	"github.com/noisysockets/network/internal/util"
 )
 

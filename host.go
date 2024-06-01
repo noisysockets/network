@@ -16,7 +16,7 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
-	"github.com/noisysockets/go-fqdn"
+	"github.com/noisysockets/netutil/fqdn"
 	"github.com/noisysockets/pinger"
 )
 
