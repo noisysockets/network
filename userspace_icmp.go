@@ -55,7 +55,7 @@ type icmpPacketConn struct {
 }
 
 func (net *UserspaceNetwork) newICMPPacketConn(network string) (stdnet.PacketConn, error) {
-	proto, useIPV4, useIPV6, err := parseNetwork(network)
+	proto, _, err := parseNetwork(network)
 	if err != nil {
 		return nil, err
 	}
@@ -69,17 +69,16 @@ func (net *UserspaceNetwork) newICMPPacketConn(network string) (stdnet.PacketCon
 		deadline: time.NewTimer(math.MaxInt64),
 	}
 
-	var pn tcpip.NetworkProtocolNumber
-	var tn tcpip.TransportProtocolNumber
-	if useIPV4 {
-		pn = header.IPv4ProtocolNumber
-		tn = header.ICMPv4ProtocolNumber
-		pc.localAddr = netip.IPv4Unspecified()
+	pc.localAddr, err = net.bindAddress(network, "")
+	if err != nil {
+		return nil, err
 	}
-	if useIPV6 {
+
+	pn := header.IPv4ProtocolNumber
+	tn := header.ICMPv4ProtocolNumber
+	if pc.localAddr.Is6() {
 		pn = header.IPv6ProtocolNumber
 		tn = header.ICMPv6ProtocolNumber
-		pc.localAddr = netip.IPv6Unspecified()
 	}
 
 	var tcpipErr tcpip.Error
@@ -162,7 +161,6 @@ func (pc *icmpPacketConn) WriteTo(p []byte, addr stdnet.Addr) (int, error) {
 		opErr.Err = err
 		return 0, opErr
 	}
-	na = na.Unmap()
 
 	if !((na.Is4() && pc.localAddr.Is4()) || (na.Is6() && pc.localAddr.Is6())) {
 		opErr.Err = errors.New("mismatched protocols")

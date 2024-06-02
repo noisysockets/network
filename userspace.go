@@ -73,10 +73,8 @@ const (
 	outboundQueueSize = 256
 )
 
-var (
-	// Ensure that UserspaceNetwork implements Network interface.
-	_ Network = (*UserspaceNetwork)(nil)
-)
+// Ensure that UserspaceNetwork implements Network interface.
+var _ Network = (*UserspaceNetwork)(nil)
 
 type UserspaceNetworkConfig struct {
 	// Hostname is the hostname of the local process.
@@ -147,7 +145,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 		hostname:      conf.Hostname,
 		domain:        conf.Domain,
 		localPrefixes: localPrefixes,
-		resolver:      resolver.IP(),
+		resolver:      resolver.Literal(),
 		stack:         stack.New(stackOpts),
 		ep:            channel.New(outboundQueueSize, uint32(nic.MTU()), ""),
 		outbound:      make(chan *stack.PacketBuffer),
@@ -191,7 +189,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 	// Assign addresses to the NIC.
 	for _, addr := range conf.Addresses {
 		var pn tcpip.NetworkProtocolNumber
-		if addr.Addr().Unmap().Is4() {
+		if addr.Addr().Is4() {
 			pn = ipv4.ProtocolNumber
 		} else if addr.Addr().Is6() {
 			pn = ipv6.ProtocolNumber
@@ -200,7 +198,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 		protocolAddress := tcpip.ProtocolAddress{
 			Protocol: pn,
 			AddressWithPrefix: tcpip.AddressWithPrefix{
-				Address:   tcpip.AddrFromSlice(addr.Addr().Unmap().AsSlice()),
+				Address:   tcpip.AddrFromSlice(addr.Addr().AsSlice()),
 				PrefixLen: addr.Bits(),
 			},
 		}
@@ -491,7 +489,12 @@ func (net *UserspaceNetwork) LookupHost(host string) ([]string, error) {
 }
 
 func (net *UserspaceNetwork) LookupHostContext(ctx context.Context, host string) ([]string, error) {
-	return net.resolver.LookupHost(ctx, host)
+	addrs, err := net.resolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+
+	return util.Strings(addrs), nil
 }
 
 func (net *UserspaceNetwork) Dial(network, address string) (stdnet.Conn, error) {
@@ -501,7 +504,7 @@ func (net *UserspaceNetwork) Dial(network, address string) (stdnet.Conn, error) 
 func (net *UserspaceNetwork) DialContext(ctx context.Context, network, address string) (stdnet.Conn, error) {
 	opErr := &stdnet.OpError{Op: "dial", Net: network}
 
-	proto, useIPV4, useIPV6, err := parseNetwork(network)
+	proto, ipVersion, err := parseNetwork(network)
 	if err != nil {
 		opErr.Err = err
 		return nil, opErr
@@ -519,15 +522,9 @@ func (net *UserspaceNetwork) DialContext(ctx context.Context, network, address s
 		return nil, opErr
 	}
 
-	allAddrs, err := net.resolver.LookupHost(ctx, host)
+	addrs, err := net.resolver.LookupNetIP(ctx, "ip"+ipVersion, host)
 	if err != nil {
 		opErr.Err = err
-		return nil, opErr
-	}
-
-	addrs := parseAndFilterAddrs(allAddrs, useIPV4, useIPV6)
-	if len(addrs) == 0 {
-		opErr.Err = ErrNoSuitableAddress
 		return nil, opErr
 	}
 
@@ -591,7 +588,7 @@ func (net *UserspaceNetwork) DialContext(ctx context.Context, network, address s
 func (net *UserspaceNetwork) Listen(network, address string) (stdnet.Listener, error) {
 	opErr := &stdnet.OpError{Op: "listen", Net: network}
 
-	proto, useIPV4, useIPV6, err := parseNetwork(network)
+	proto, ipVersion, err := parseNetwork(network)
 	if err != nil {
 		opErr.Err = err
 		return nil, opErr
@@ -614,7 +611,7 @@ func (net *UserspaceNetwork) Listen(network, address string) (stdnet.Listener, e
 		return nil, opErr
 	}
 
-	addr, err := net.bindAddress(host, useIPV4, useIPV6)
+	addr, err := net.bindAddress("ip"+ipVersion, host)
 	if err != nil {
 		opErr.Err = err
 		return nil, opErr
@@ -628,7 +625,7 @@ func (net *UserspaceNetwork) Listen(network, address string) (stdnet.Listener, e
 func (net *UserspaceNetwork) ListenPacket(network, address string) (stdnet.PacketConn, error) {
 	opErr := &stdnet.OpError{Op: "listen", Net: network}
 
-	proto, useIPV4, useIPV6, err := parseNetwork(network)
+	proto, ipVersion, err := parseNetwork(network)
 	if err != nil {
 		opErr.Err = err
 		return nil, opErr
@@ -651,7 +648,7 @@ func (net *UserspaceNetwork) ListenPacket(network, address string) (stdnet.Packe
 		return nil, opErr
 	}
 
-	addr, err := net.bindAddress(host, useIPV4, useIPV6)
+	addr, err := net.bindAddress("ip"+ipVersion, host)
 	if err != nil {
 		opErr.Err = err
 		return nil, opErr
@@ -667,24 +664,19 @@ func (net *UserspaceNetwork) Ping(ctx context.Context, network, host string) err
 }
 
 // TODO: binding to both IPv4 and IPv6 / multiple addresses?
-func (net *UserspaceNetwork) bindAddress(host string, useIPV4, useIPV6 bool) (addr netip.Addr, err error) {
+func (net *UserspaceNetwork) bindAddress(network, host string) (addr netip.Addr, err error) {
 	allNICAddrs := net.stack.AllAddresses()[nicID]
 
 	if host != "" {
-		allAddrs, err := net.resolver.LookupHost(context.Background(), host)
+		addrs, err := net.resolver.LookupNetIP(context.Background(), network, host)
 		if err != nil {
 			return addr, err
-		}
-
-		addrs := parseAndFilterAddrs(allAddrs, useIPV4, useIPV6)
-		if len(addrs) == 0 {
-			return addr, ErrNoSuitableAddress
 		}
 
 		// See if we find a matching address assigned to the NIC.
 		for _, addr := range addrs {
 			for _, nicAddr := range allNICAddrs {
-				if nicAddr.AddressWithPrefix.Address == tcpip.AddrFromSlice(addr.Unmap().AsSlice()) {
+				if nicAddr.AddressWithPrefix.Address == tcpip.AddrFromSlice(addr.AsSlice()) {
 					return addr, nil
 				}
 			}
@@ -696,11 +688,19 @@ func (net *UserspaceNetwork) bindAddress(host string, useIPV4, useIPV6 bool) (ad
 		}
 	}
 
+	var hasV6 bool
+	for _, nicAddr := range allNICAddrs {
+		if addr, ok := netip.AddrFromSlice(nicAddr.AddressWithPrefix.Address.AsSlice()); ok && addr.Is6() {
+			hasV6 = true
+			break
+		}
+	}
+
 	var pn tcpip.NetworkProtocolNumber
-	if useIPV4 {
-		pn = ipv4.ProtocolNumber
-	} else {
+	if hasV6 && network != "ip4" {
 		pn = ipv6.ProtocolNumber
+	} else {
+		pn = ipv4.ProtocolNumber
 	}
 
 	mainAddress, tcpipErr := net.stack.GetMainNICAddress(nicID, pn)
@@ -798,7 +798,7 @@ func defaultIPTables(clock tcpip.Clock, rand *rand.Rand, localPrefixes *cidrs.Tr
 
 func convertToFullAddr(nicID tcpip.NICID, addrPort netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
 	var pn tcpip.NetworkProtocolNumber
-	if addrPort.Addr().Unmap().Is4() {
+	if addrPort.Addr().Is4() {
 		pn = ipv4.ProtocolNumber
 	} else {
 		pn = ipv6.ProtocolNumber
@@ -806,7 +806,7 @@ func convertToFullAddr(nicID tcpip.NICID, addrPort netip.AddrPort) (tcpip.FullAd
 
 	return tcpip.FullAddress{
 		NIC:  nicID,
-		Addr: tcpip.AddrFromSlice(addrPort.Addr().Unmap().AsSlice()),
+		Addr: tcpip.AddrFromSlice(addrPort.Addr().AsSlice()),
 		Port: addrPort.Port(),
 	}, pn
 }

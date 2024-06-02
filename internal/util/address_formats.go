@@ -23,5 +23,6 @@ func AddrPortFrom(addr tcpip.Address, port uint16) netip.AddrPort {
 // AddrFrom returns a netip.Addr from a tcpip.Address.
 func AddrFrom(addr tcpip.Address) (netipAddr netip.Addr) {
 	netipAddr, _ = netip.AddrFromSlice(addr.AsSlice())
+	// TODO: be more explicit about why unmap is necessary.
 	return netipAddr.Unmap()
 }
