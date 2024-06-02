@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/noisysockets/network/internal/testutil"
+	"github.com/noisysockets/network/internal/util"
 
 	"github.com/neilotoole/slogt"
 	"github.com/noisysockets/network"
@@ -57,6 +58,7 @@ func TestForwarder(t *testing.T) {
 			netip.MustParsePrefix("0.0.0.0/0"),
 			netip.MustParsePrefix("::/0"),
 		},
+		EnableNAT64: util.PointerTo(false),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -164,6 +166,98 @@ func TestForwarder(t *testing.T) {
 		defer cancel()
 
 		err := netB.Ping(ctx, "ip6", "2001:4860:4860::8888")
+		require.NoError(t, err)
+	})
+}
+
+func TestForwarderWithNAT64(t *testing.T) {
+	testutil.EnsureIPv6(t)
+
+	logger := slogt.New(t)
+
+	// Create what is essentially a userspace veth pair.
+	nicA, nicB := network.Pipe(1500, 16)
+	t.Cleanup(func() {
+		require.NoError(t, nicA.Close())
+		require.NoError(t, nicB.Close())
+	})
+
+	ctx := context.Background()
+
+	netA, err := network.Userspace(ctx, logger.With(slog.String("net", "a")), nicA, network.UserspaceNetworkConfig{
+		Addresses: []netip.Prefix{
+			netip.MustParsePrefix("fdff:7061:ac89::1/128"),
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = netA.Close()
+	})
+
+	// Forward out to the host network from net A.
+	fwd, err := forwarder.New(ctx, logger, netA, network.Host(), &forwarder.ForwarderConfig{
+		AllowedDestinations: []netip.Prefix{
+			netip.MustParsePrefix("::/0"),
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = fwd.Close()
+	})
+
+	err = netA.EnableForwarding(fwd)
+	require.NoError(t, err)
+
+	netB, err := network.Userspace(ctx, logger.With(slog.String("net", "b")), nicB, network.UserspaceNetworkConfig{
+		Addresses: []netip.Prefix{
+			netip.MustParsePrefix("fdff:7061:ac89::2/128"),
+		},
+		ResolverFactory: func(dialContext network.DialContextFunc) (resolver.Resolver, error) {
+			// Googles public DNS64 resolver.
+			return resolver.DNS(resolver.DNSResolverConfig{
+				Server: netip.AddrPortFrom(netip.MustParseAddr("2001:4860:4860::6464"), 53),
+			}), nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = netB.Close()
+	})
+
+	// Create a http client that will dial out through our network.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = netB.DialContext
+
+	client := *http.DefaultClient
+	client.Transport = transport
+
+	t.Run("IPv4 Translation", func(t *testing.T) {
+		// Make a request to a public ipv4 address to verify that our forwarder is working.
+		resp, err := client.Get("https://ipv4.icanhazip.com")
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = resp.Body.Close()
+		})
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		// Make sure the response body is a valid IPv4 address.
+		addr, err := netip.ParseAddr(strings.TrimSpace(string(body)))
+		require.NoError(t, err)
+
+		require.True(t, addr.Unmap().Is4())
+	})
+
+	t.Run("ICMPv4 Translation", func(t *testing.T) {
+		testutil.EnsureNotGitHubActions(t)
+
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		err := netB.Ping(ctx, "ip6", "ipv4.icanhazip.com")
 		require.NoError(t, err)
 	})
 }

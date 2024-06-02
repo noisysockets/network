@@ -161,6 +161,7 @@ func (pc *icmpPacketConn) WriteTo(p []byte, addr stdnet.Addr) (int, error) {
 		opErr.Err = err
 		return 0, opErr
 	}
+	na = na.Unmap()
 
 	if !((na.Is4() && pc.localAddr.Is4()) || (na.Is6() && pc.localAddr.Is6())) {
 		opErr.Err = errors.New("mismatched protocols")

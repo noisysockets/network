@@ -156,11 +156,6 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 
 	net.notifyHandle = net.ep.AddNotify(net)
 
-	net.pinger = pinger.New(
-		pinger.WithLogger(logger),
-		pinger.WithPacketConnFactory(net.newICMPPacketConn),
-	)
-
 	if conf.ResolverFactory != nil {
 		var err error
 		net.resolver, err = conf.ResolverFactory(net.DialContext)
@@ -169,6 +164,12 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 			return nil, fmt.Errorf("failed to create resolver: %v", err)
 		}
 	}
+
+	net.pinger = pinger.New(
+		pinger.WithLogger(logger),
+		pinger.WithResolver(net.resolver),
+		pinger.WithPacketConnFactory(net.newICMPPacketConn),
+	)
 
 	var ep stack.LinkEndpoint = net.ep
 	if conf.PacketCaptureWriter != nil {
@@ -189,7 +190,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 	// Assign addresses to the NIC.
 	for _, addr := range conf.Addresses {
 		var pn tcpip.NetworkProtocolNumber
-		if addr.Addr().Is4() {
+		if addr.Addr().Unmap().Is4() {
 			pn = ipv4.ProtocolNumber
 		} else if addr.Addr().Is6() {
 			pn = ipv6.ProtocolNumber
@@ -198,7 +199,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 		protocolAddress := tcpip.ProtocolAddress{
 			Protocol: pn,
 			AddressWithPrefix: tcpip.AddressWithPrefix{
-				Address:   tcpip.AddrFromSlice(addr.Addr().AsSlice()),
+				Address:   util.TcpipAddrFrom(addr.Addr()),
 				PrefixLen: addr.Bits(),
 			},
 		}
@@ -676,7 +677,7 @@ func (net *UserspaceNetwork) bindAddress(network, host string) (addr netip.Addr,
 		// See if we find a matching address assigned to the NIC.
 		for _, addr := range addrs {
 			for _, nicAddr := range allNICAddrs {
-				if nicAddr.AddressWithPrefix.Address == tcpip.AddrFromSlice(addr.AsSlice()) {
+				if nicAddr.AddressWithPrefix.Address == util.TcpipAddrFrom(addr) {
 					return addr, nil
 				}
 			}
@@ -688,12 +689,27 @@ func (net *UserspaceNetwork) bindAddress(network, host string) (addr netip.Addr,
 		}
 	}
 
-	var hasV6 bool
+	var hasV4, hasV6 bool
 	for _, nicAddr := range allNICAddrs {
-		if addr, ok := netip.AddrFromSlice(nicAddr.AddressWithPrefix.Address.AsSlice()); ok && addr.Is6() {
-			hasV6 = true
-			break
+		addr, ok := netip.AddrFromSlice(nicAddr.AddressWithPrefix.Address.AsSlice())
+		if !ok {
+			continue
 		}
+
+		// Make sure not a broadcast/multicast address.
+		if (addr.Unmap().Is4() && addr.Unmap() == netip.AddrFrom4([4]byte{255, 255, 255, 255})) || addr.IsMulticast() {
+			continue
+		}
+
+		if addr.Unmap().Is4() {
+			hasV4 = true
+		} else if addr.Is6() {
+			hasV6 = true
+		}
+	}
+
+	if (network == "ip4" && !hasV4) || (network == "ip6" && !hasV6) {
+		return addr, ErrNoSuitableAddress
 	}
 
 	var pn tcpip.NetworkProtocolNumber
@@ -798,7 +814,7 @@ func defaultIPTables(clock tcpip.Clock, rand *rand.Rand, localPrefixes *cidrs.Tr
 
 func convertToFullAddr(nicID tcpip.NICID, addrPort netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
 	var pn tcpip.NetworkProtocolNumber
-	if addrPort.Addr().Is4() {
+	if addrPort.Addr().Unmap().Is4() {
 		pn = ipv4.ProtocolNumber
 	} else {
 		pn = ipv6.ProtocolNumber
@@ -806,7 +822,7 @@ func convertToFullAddr(nicID tcpip.NICID, addrPort netip.AddrPort) (tcpip.FullAd
 
 	return tcpip.FullAddress{
 		NIC:  nicID,
-		Addr: tcpip.AddrFromSlice(addrPort.Addr().AsSlice()),
+		Addr: util.TcpipAddrFrom(addrPort.Addr()),
 		Port: addrPort.Port(),
 	}, pn
 }

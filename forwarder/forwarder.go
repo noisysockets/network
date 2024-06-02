@@ -67,6 +67,8 @@ type ForwarderConfig struct {
 	UDPIdleTimeout *time.Duration
 	// How long to wait for an ICMP echo reply before considering it timed out.
 	PingTimeout *time.Duration
+	// Enable NAT64.
+	EnableNAT64 *bool
 }
 
 // Default values (if not set).
@@ -79,6 +81,7 @@ var defaultForwarderConf = ForwarderConfig{
 	MaxInFlightTCPConnections: util.PointerTo(2048), // TODO: tune this.
 	UDPIdleTimeout:            util.PointerTo(30 * time.Second),
 	PingTimeout:               util.PointerTo(30 * time.Second),
+	EnableNAT64:               util.PointerTo(true),
 }
 
 // Forwarder is a network session forwarder.
@@ -94,6 +97,7 @@ type Forwarder struct {
 	deniedDestinations  *cidrs.TrieMap[struct{}]
 	udpIdleTimeout      time.Duration
 	pingTimeout         time.Duration
+	enableNAT64         bool
 }
 
 func New(ctx context.Context, logger *slog.Logger, srcNet, dstNet network.Network, conf *ForwarderConfig) (*Forwarder, error) {
@@ -129,6 +133,7 @@ func New(ctx context.Context, logger *slog.Logger, srcNet, dstNet network.Networ
 		deniedDestinations:  deniedDestinations,
 		udpIdleTimeout:      *conf.UDPIdleTimeout,
 		pingTimeout:         *conf.PingTimeout,
+		enableNAT64:         *conf.EnableNAT64,
 	}
 
 	fwd.tcpForwarder = tcp.NewForwarder(fwd.srcStack, 0, *conf.MaxInFlightTCPConnections, fwd.tcpHandler)
@@ -260,7 +265,15 @@ func (f *Forwarder) ICMPv6ProtocolHandler(id stack.TransportEndpointID, pkt *sta
 
 			dstAddr := util.AddrFrom(id.LocalAddress)
 
-			if err := f.dstNet.Ping(ctx, "ip6", dstAddr.String()); err != nil {
+			// Unmap the destination address if NAT64 is enabled.
+			dstAddr, isNAT64 := f.unmapNAT64Addr(dstAddr)
+
+			network := "ip6"
+			if isNAT64 {
+				network = "ip4"
+			}
+
+			if err := f.dstNet.Ping(ctx, network, dstAddr.String()); err != nil {
 				logger.Debug("Failed to ping destination", slog.Any("error", err))
 				// TODO: if the destination is unreachable, send an ICMPv6 unreachable message.
 				return
@@ -334,6 +347,10 @@ func (f *Forwarder) tcpHandler(req *tcp.ForwarderRequest) {
 		local := gonet.NewTCPConn(&wq, ep)
 		defer local.Close()
 
+		// Unmap the destination address if NAT64 is enabled.
+		dstAddr, _ := f.unmapNAT64Addr(dstAddrPort.Addr())
+		dstAddrPort = netip.AddrPortFrom(dstAddr, dstAddrPort.Port())
+
 		// Connect to the destination.
 		remote, err := f.dstNet.DialContext(ctx, "tcp", dstAddrPort.String())
 		if err != nil {
@@ -389,6 +406,10 @@ func (f *Forwarder) udpHandler(req *udp.ForwarderRequest) {
 
 		local := gonet.NewUDPConn(&wq, ep)
 		defer local.Close()
+
+		// Unmap the destination address if NAT64 is enabled.
+		dstAddr, _ := f.unmapNAT64Addr(dstAddrPort.Addr())
+		dstAddrPort = netip.AddrPortFrom(dstAddr, dstAddrPort.Port())
 
 		remote, err := f.dstNet.DialContext(f.ctx, "udp", dstAddrPort.String())
 		if err != nil {
@@ -539,4 +560,17 @@ func (f *Forwarder) sendICMPv6EchoReply(pkt *stack.PacketBuffer) error {
 	}
 
 	return nil
+}
+
+// nat64Prefix is the well-known NAT64 prefix.
+var nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+
+// Unmap the well-known NAT64 prefix (if present and NAT64 is enabled).
+func (f *Forwarder) unmapNAT64Addr(addr netip.Addr) (netip.Addr, bool) {
+	if f.enableNAT64 && addr.Is6() && nat64Prefix.Contains(addr) {
+		addr = netip.AddrFrom4([4]byte(addr.AsSlice()[12:]))
+		return addr, true
+	}
+
+	return addr, false
 }
