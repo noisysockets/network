@@ -69,6 +69,8 @@ type ForwarderConfig struct {
 	PingTimeout *time.Duration
 	// Enable NAT64.
 	EnableNAT64 *bool
+	// NAT64 prefix.
+	NAT64Prefix *netip.Prefix
 }
 
 // Default values (if not set).
@@ -82,6 +84,7 @@ var defaultForwarderConf = ForwarderConfig{
 	UDPIdleTimeout:            util.PointerTo(30 * time.Second),
 	PingTimeout:               util.PointerTo(30 * time.Second),
 	EnableNAT64:               util.PointerTo(true),
+	NAT64Prefix:               util.PointerTo(netip.MustParsePrefix("64:ff9b::/96")),
 }
 
 // Forwarder is a network session forwarder.
@@ -98,6 +101,7 @@ type Forwarder struct {
 	udpIdleTimeout      time.Duration
 	pingTimeout         time.Duration
 	enableNAT64         bool
+	nat64Prefix         netip.Prefix
 }
 
 func New(ctx context.Context, logger *slog.Logger, srcNet, dstNet network.Network, conf *ForwarderConfig) (*Forwarder, error) {
@@ -134,6 +138,7 @@ func New(ctx context.Context, logger *slog.Logger, srcNet, dstNet network.Networ
 		udpIdleTimeout:      *conf.UDPIdleTimeout,
 		pingTimeout:         *conf.PingTimeout,
 		enableNAT64:         *conf.EnableNAT64,
+		nat64Prefix:         *conf.NAT64Prefix,
 	}
 
 	fwd.tcpForwarder = tcp.NewForwarder(fwd.srcStack, 0, *conf.MaxInFlightTCPConnections, fwd.tcpHandler)
@@ -562,12 +567,9 @@ func (f *Forwarder) sendICMPv6EchoReply(pkt *stack.PacketBuffer) error {
 	return nil
 }
 
-// nat64Prefix is the well-known NAT64 prefix.
-var nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
-
 // Unmap the well-known NAT64 prefix (if present and NAT64 is enabled).
 func (f *Forwarder) unmapNAT64Addr(addr netip.Addr) (netip.Addr, bool) {
-	if f.enableNAT64 && addr.Is6() && nat64Prefix.Contains(addr) {
+	if f.enableNAT64 && addr.Is6() && f.nat64Prefix.Contains(addr) {
 		addr = netip.AddrFrom4([4]byte(addr.AsSlice()[12:]))
 		return addr, true
 	}
