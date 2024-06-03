@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/neilotoole/slogt"
+	"github.com/noisysockets/netstack/pkg/tcpip/header"
 	"github.com/noisysockets/network"
 	"github.com/stretchr/testify/require"
 )
@@ -92,4 +93,78 @@ func TestUserspaceNetwork(t *testing.T) {
 	require.NoError(t, err)
 
 	require.True(t, strings.Contains(string(body), "hello"))
+}
+
+// Noisy sockets uses a 1280 byte MTU but wireguard uses 1420 bytes by default.
+// So make sure that we can receive packets larger than our MTU without blowing
+// up.
+func TestJumboPacket(t *testing.T) {
+	ctx := context.Background()
+
+	logger := slogt.New(t)
+
+	nicA, nicB := network.Pipe(1500, 16)
+	t.Cleanup(func() {
+		_ = nicA.Close()
+		_ = nicB.Close()
+	})
+
+	netA, err := network.Userspace(ctx, logger.With(slog.String("net", "a")), &jumboNic{nicA}, network.UserspaceNetworkConfig{
+		Addresses: []netip.Prefix{netip.MustParsePrefix("100.64.0.1/32")},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = netA.Close()
+	})
+
+	netB, err := network.Userspace(ctx, logger.With(slog.String("net", "b")), nicB, network.UserspaceNetworkConfig{
+		Addresses: []netip.Prefix{netip.MustParsePrefix("100.64.0.2/32")},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = netB.Close()
+	})
+
+	// Start a UDP server on netB.
+	udpListener, err := netB.ListenPacket("udp", ":1234")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, udpListener.Close())
+	})
+
+	jumboDatagramSize := 9000 - header.IPv4MinimumSize - header.UDPMinimumSize
+	rxBuf := make([]byte, jumboDatagramSize)
+	rx := make(chan struct{})
+
+	go func() {
+		_, _, err := udpListener.ReadFrom(rxBuf)
+		if err != nil {
+			logger.Error("failed to read from UDP listener", slog.Any("error", err))
+		}
+
+		close(rx)
+	}()
+
+	// Send a jumbo packet from netA to netB.
+	pc, err := netA.DialContext(ctx, "udp", "100.64.0.2:1234")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, pc.Close())
+	})
+
+	txBuf := []byte(strings.Repeat("a", jumboDatagramSize))
+	_, err = pc.Write(txBuf)
+	require.NoError(t, err)
+
+	<-rx
+
+	require.Equal(t, txBuf, rxBuf)
+}
+
+type jumboNic struct {
+	network.Interface
+}
+
+func (j *jumboNic) MTU() int {
+	return 9000
 }

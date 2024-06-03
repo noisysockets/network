@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand"
 	"net/netip"
 	"os"
@@ -321,13 +322,15 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 		net.tasksCancel()
 	}()
 
+	// largest possible udp datagram.
+	maxSegmentSize := math.MaxUint16
 	batchSize := net.nic.BatchSize()
 	mtu := net.nic.MTU()
 
 	sizes := make([]int, batchSize)
 	bufs := make([][]byte, batchSize)
 	for i := 0; i < batchSize; i++ {
-		bufs[i] = make([]byte, mtu)
+		bufs[i] = make([]byte, maxSegmentSize)
 	}
 
 	net.logger.Debug("Started copying inbound packets")
@@ -345,13 +348,14 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 
 		for i := 0; i < n; i++ {
 			if sizes[i] > mtu {
-				net.logger.Error("Inbound packet size exceeds MTU",
+				net.logger.Warn("Inbound packet size exceeds MTU",
 					slog.Int("size", sizes[i]),
 					slog.Int("mtu", mtu))
 
 				// TODO: in the future if it's an IPv6 packet, we should send an
 				// ICMPv6 Packet Too Big response.
-				continue
+				// If it's an IPv4 packet, we should send an ICMPv4 fragmentation
+				// needed response.
 			}
 
 			buf := bufs[i][:sizes[i]]
@@ -388,13 +392,6 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 		defer pkt.DecRef()
 
 		view := pkt.ToView()
-		if view.Size() > mtu {
-			net.logger.Error("Outbound packet size exceeds MTU",
-				slog.Int("size", view.Size()),
-				slog.Int("mtu", mtu))
-			return
-		}
-
 		sizes[idx], _ = view.Read(bufs[idx])
 		view.Release()
 	}
