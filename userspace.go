@@ -344,6 +344,16 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 		}
 
 		for i := 0; i < n; i++ {
+			if sizes[i] > mtu {
+				net.logger.Error("Inbound packet size exceeds MTU",
+					slog.Int("size", sizes[i]),
+					slog.Int("mtu", mtu))
+
+				// TODO: in the future if it's an IPv6 packet, we should send an
+				// ICMPv6 Packet Too Big response.
+				continue
+			}
+
 			buf := bufs[i][:sizes[i]]
 
 			var protocolNumber tcpip.NetworkProtocolNumber
@@ -378,6 +388,13 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 		defer pkt.DecRef()
 
 		view := pkt.ToView()
+		if view.Size() > mtu {
+			net.logger.Error("Outbound packet size exceeds MTU",
+				slog.Int("size", view.Size()),
+				slog.Int("mtu", mtu))
+			return
+		}
+
 		sizes[idx], _ = view.Read(bufs[idx])
 		view.Release()
 	}

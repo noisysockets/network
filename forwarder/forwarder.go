@@ -324,7 +324,7 @@ func (f *Forwarder) tcpHandler(req *tcp.ForwarderRequest) {
 		var wq waiter.Queue
 		ep, tcpipErr := req.CreateEndpoint(&wq)
 		if tcpipErr != nil {
-			logger.Error("Failed to create local endpoint",
+			logger.Warn("Failed to create local endpoint",
 				slog.String("error", tcpipErr.String()))
 
 			req.Complete(true)
@@ -399,7 +399,7 @@ func (f *Forwarder) udpHandler(req *udp.ForwarderRequest) {
 	var wq waiter.Queue
 	ep, tcpipErr := req.CreateEndpoint(&wq)
 	if tcpipErr != nil {
-		logger.Error("Failed to create local endpoint",
+		logger.Warn("Failed to create local endpoint",
 			slog.String("error", tcpipErr.String()))
 
 		return
