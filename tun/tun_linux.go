@@ -53,6 +53,8 @@ const (
 	ifReqSize       = unix.IFNAMSIZ + 64
 )
 
+var _ network.Interface = (*NativeTun)(nil)
+
 // NativeTun is a TUN device implementation for linux.
 type NativeTun struct {
 	logger *slog.Logger
@@ -129,16 +131,18 @@ func (tun *NativeTun) Close() error {
 	return err
 }
 
-func (tun *NativeTun) Read(ctx context.Context, bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(ctx context.Context, packets []*network.Packet) (int, error) {
 	tun.readOpMu.Lock()
 	defer tun.readOpMu.Unlock()
+
+	packets[0].Reset()
 
 	for {
 		if err := tun.tunFile.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
 			return 0, err
 		}
 
-		readInto := bufs[0][offset:]
+		readInto := packets[0].Buf[:]
 		n, err := tun.tunFile.Read(readInto)
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
@@ -154,18 +158,18 @@ func (tun *NativeTun) Read(ctx context.Context, bufs [][]byte, sizes []int, offs
 			}
 			return 0, err
 		}
-		sizes[0] = n
+		packets[0].Size = n
 		return 1, nil
 	}
 }
 
-func (tun *NativeTun) Write(ctx context.Context, bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Write(ctx context.Context, packets []*network.Packet) (int, error) {
 	tun.writeOpMu.Lock()
 	defer tun.writeOpMu.Unlock()
 
 	var total int
-	for i, buf := range bufs {
-		buf := buf[offset : offset+sizes[i]]
+	for _, pkt := range packets {
+		buf := pkt.Buf[pkt.Offset : pkt.Offset+pkt.Size]
 
 	ATTEMPT_WRITE:
 		if err := tun.tunFile.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {

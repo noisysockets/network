@@ -14,9 +14,9 @@ require (
 	github.com/miekg/dns v1.1.59 // indirect
 	github.com/noisysockets/contextio v0.4.0 // indirect
 	github.com/noisysockets/netstack v0.7.0 // indirect
-	github.com/noisysockets/netutil v0.4.0 // indirect
+	github.com/noisysockets/netutil v0.6.1 // indirect
 	github.com/noisysockets/pinger v0.4.2 // indirect
-	github.com/noisysockets/resolver v0.8.0 // indirect
+	github.com/noisysockets/resolver v0.10.0 // indirect
 	golang.org/x/mod v0.17.0 // indirect
 	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sync v0.7.0 // indirect

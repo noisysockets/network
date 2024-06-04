@@ -14,17 +14,17 @@ import (
 
 	"github.com/noisysockets/netstack/pkg/tcpip/header"
 	"github.com/noisysockets/netstack/pkg/tcpip/stack"
-	"github.com/noisysockets/netutil/cidrs"
+	"github.com/noisysockets/netutil/triemap"
 	"github.com/noisysockets/network/internal/util"
 )
 
 var _ stack.Matcher = (*destinationMatcher)(nil)
 
 type destinationMatcher struct {
-	prefixes *cidrs.TrieMap[struct{}]
+	prefixes *triemap.TrieMap[struct{}]
 }
 
-func Destination(prefixes *cidrs.TrieMap[struct{}]) *destinationMatcher {
+func Destination(prefixes *triemap.TrieMap[struct{}]) *destinationMatcher {
 	return &destinationMatcher{prefixes: prefixes}
 }
 

@@ -9,9 +9,9 @@ require (
 	github.com/neilotoole/slogt v1.1.0
 	github.com/noisysockets/contextio v0.4.0
 	github.com/noisysockets/netstack v0.7.0
-	github.com/noisysockets/netutil v0.4.0
+	github.com/noisysockets/netutil v0.6.1
 	github.com/noisysockets/pinger v0.4.2
-	github.com/noisysockets/resolver v0.8.0
+	github.com/noisysockets/resolver v0.10.0
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/sync v0.7.0
 	golang.org/x/sys v0.20.0

@@ -55,11 +55,15 @@ type Interface interface {
 	// packet lengths within the sizes slice. len(sizes) must be >= len(bufs).
 	// A nonzero offset can be used to instruct the interface on where to begin
 	// reading into each element of the bufs slice.
-	Read(ctx context.Context, bufs [][]byte, sizes []int, offset int) (n int, err error)
+	// Ownership of the packets is not transferred to the interface and stays the
+	// responsibility of the caller.
+	Read(ctx context.Context, packets []*Packet) (n int, err error)
 
 	// Write one or more packets to the interface (without any additional headers).
 	// On a successful write it returns the number of packets written. A nonzero
 	// offset can be used to instruct the interface on where to begin writing from
 	// each packet contained within the bufs slice.
-	Write(ctx context.Context, bufs [][]byte, sizes []int, offset int) (int, error)
+	// Ownership of the packets is not transferred to the interface and stays the
+	// responsibility of the caller.
+	Write(ctx context.Context, packets []*Packet) (int, error)
 }

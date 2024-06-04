@@ -37,7 +37,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"math/rand"
 	"net/netip"
 	"os"
@@ -59,7 +58,7 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/icmp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
-	"github.com/noisysockets/netutil/cidrs"
+	"github.com/noisysockets/netutil/triemap"
 	"github.com/noisysockets/network/internal/iptables/matcher"
 	"github.com/noisysockets/network/internal/iptables/target"
 	"github.com/noisysockets/network/internal/protocol"
@@ -97,7 +96,7 @@ type UserspaceNetwork struct {
 	nic           Interface
 	hostname      string
 	domain        string
-	localPrefixes *cidrs.TrieMap[struct{}]
+	localPrefixes *triemap.TrieMap[struct{}]
 	resolver      resolver.Resolver
 	stack         *stack.Stack
 	ep            *channel.Endpoint
@@ -113,7 +112,7 @@ type UserspaceNetwork struct {
 // Userspace returns a userspace Network implementation based on Netstack from
 // the gVisor project.
 func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf UserspaceNetworkConfig) (*UserspaceNetwork, error) {
-	localPrefixes := cidrs.NewTrieMap[struct{}]()
+	localPrefixes := triemap.New[struct{}]()
 	for _, addr := range conf.Addresses {
 		localPrefixes.Insert(addr, struct{}{})
 	}
@@ -322,21 +321,23 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 		net.tasksCancel()
 	}()
 
-	// largest possible udp datagram.
-	maxSegmentSize := math.MaxUint16
 	batchSize := net.nic.BatchSize()
 	mtu := net.nic.MTU()
 
-	sizes := make([]int, batchSize)
-	bufs := make([][]byte, batchSize)
+	packets := make([]*Packet, batchSize)
 	for i := 0; i < batchSize; i++ {
-		bufs[i] = make([]byte, maxSegmentSize)
+		packets[i] = NewPacket()
 	}
+	defer func() {
+		for _, pkt := range packets {
+			pkt.Release()
+		}
+	}()
 
 	net.logger.Debug("Started copying inbound packets")
 
 	for {
-		n, err := net.nic.Read(net.tasksCtx, bufs, sizes, 0)
+		n, err := net.nic.Read(net.tasksCtx, packets)
 		if err != nil {
 			if errors.Is(err, stdnet.ErrClosed) ||
 				errors.Is(err, os.ErrClosed) {
@@ -347,9 +348,10 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 		}
 
 		for i := 0; i < n; i++ {
-			if sizes[i] > mtu {
+			pkt := packets[i]
+			if pkt.Size > mtu {
 				net.logger.Warn("Inbound packet size exceeds MTU",
-					slog.Int("size", sizes[i]),
+					slog.Int("size", pkt.Size),
 					slog.Int("mtu", mtu))
 
 				// TODO: in the future if it's an IPv6 packet, we should send an
@@ -358,7 +360,7 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 				// needed response.
 			}
 
-			buf := bufs[i][:sizes[i]]
+			buf := pkt.Buf[pkt.Offset : pkt.Offset+pkt.Size]
 
 			var protocolNumber tcpip.NetworkProtocolNumber
 			switch header.IPVersion(buf) {
@@ -368,8 +370,8 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 				protocolNumber = header.IPv6ProtocolNumber
 			}
 
-			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(buf)})
-			net.ep.InjectInbound(protocolNumber, pkt)
+			net.ep.InjectInbound(protocolNumber,
+				stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(buf)}))
 		}
 	}
 }
@@ -380,25 +382,29 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 	}()
 
 	batchSize := net.nic.BatchSize()
-	mtu := net.nic.MTU()
 
-	sizes := make([]int, batchSize)
-	bufs := make([][]byte, batchSize)
+	packets := make([]*Packet, batchSize)
 	for i := 0; i < batchSize; i++ {
-		bufs[i] = make([]byte, mtu)
+		packets[i] = NewPacket()
 	}
+	defer func() {
+		for _, pkt := range packets {
+			pkt.Release()
+		}
+	}()
 
 	processPacket := func(idx int, pkt *stack.PacketBuffer) {
 		defer pkt.DecRef()
 
 		view := pkt.ToView()
-		sizes[idx], _ = view.Read(bufs[idx])
+		packets[idx].Reset()
+		packets[idx].Size, _ = view.Read(packets[idx].Buf[:])
 		view.Release()
 	}
 
 	writeBatch := func(n int) error {
 		for i := 0; i < n; {
-			writtenPackets, err := net.nic.Write(net.tasksCtx, bufs[i:n], sizes[i:n], 0)
+			writtenPackets, err := net.nic.Write(net.tasksCtx, packets[:n])
 			if err != nil {
 				return fmt.Errorf("failed to write packets: %v", err)
 			}
@@ -751,7 +757,7 @@ func (net *UserspaceNetwork) bindAddress(network, host string) (addr netip.Addr,
 // This is due to ICMP dispatching occuring at lower layer in the network stack.
 // We use iptables to implement a workaround which involves rewriting the ICMP protocol
 // number and passing it to the stack (where we subsequently catch and forward it).
-func defaultIPTables(clock tcpip.Clock, rand *rand.Rand, localPrefixes *cidrs.TrieMap[struct{}]) *stack.IPTables {
+func defaultIPTables(clock tcpip.Clock, rand *rand.Rand, localPrefixes *triemap.TrieMap[struct{}]) *stack.IPTables {
 	const (
 		RewriteICMPRule = iota
 		AllowRule

@@ -24,41 +24,52 @@ func TestPipe(t *testing.T) {
 		require.NoError(t, nicB.Close())
 	})
 
-	sizes := make([]int, nicA.BatchSize())
-
-	bufs := make([][]byte, nicA.BatchSize())
+	packets := make([]*network.Packet, nicA.BatchSize())
 	for i := 0; i < nicA.BatchSize(); i++ {
-		bufs[i] = make([]byte, nicA.MTU())
+		packets[i] = network.NewPacket()
 	}
+	t.Cleanup(func() {
+		for _, pkt := range packets {
+			pkt.Release()
+		}
+	})
 
 	// Send a packet from A to B.
 	// Make sure B receives it.
 
+	pkt := network.NewPacket()
+	pkt.Size = copy(pkt.Buf[:], []byte("hello"))
+
 	ctx := context.Background()
-	n, err := nicA.Write(ctx, [][]byte{[]byte("hello")}, []int{5}, 0)
+	n, err := nicA.Write(ctx, []*network.Packet{pkt})
+	pkt.Release()
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
 
-	n, err = nicB.Read(ctx, bufs, sizes, 0)
+	n, err = nicB.Read(ctx, packets)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
-	require.Equal(t, 5, sizes[0])
-	require.Equal(t, "hello", string(bufs[0][:5]))
+	require.Equal(t, 5, packets[0].Size)
+	require.Equal(t, "hello", string(packets[0].Buf[:5]))
 
 	// Send a packet from B to A.
 	// Make sure A receives it.
 
-	n, err = nicB.Write(ctx, [][]byte{[]byte("world")}, []int{5}, 0)
+	pkt = network.NewPacket()
+	pkt.Size = copy(pkt.Buf[:], []byte("world"))
+
+	n, err = nicB.Write(ctx, []*network.Packet{pkt})
+	pkt.Release()
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
 
-	n, err = nicA.Read(ctx, bufs, sizes, 0)
+	n, err = nicA.Read(ctx, packets)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
-	require.Equal(t, 5, sizes[0])
-	require.Equal(t, "world", string(bufs[0][:5]))
+	require.Equal(t, 5, packets[0].Size)
+	require.Equal(t, "world", string(packets[0].Buf[:5]))
 }

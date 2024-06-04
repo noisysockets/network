@@ -33,4 +33,4 @@
 // The TUN device is intended only for development and testing purposes.
 package tun
 
-const DefaultMTU = 1420
+const DefaultMTU = 1280

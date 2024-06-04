@@ -48,7 +48,7 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
 	"github.com/noisysockets/netstack/pkg/waiter"
-	"github.com/noisysockets/netutil/cidrs"
+	"github.com/noisysockets/netutil/triemap"
 	"github.com/noisysockets/network"
 	"github.com/noisysockets/network/internal/util"
 )
@@ -96,8 +96,8 @@ type Forwarder struct {
 	dstNet              network.Network
 	tcpForwarder        *tcp.Forwarder
 	udpForwarder        *udp.Forwarder
-	allowedDestinations *cidrs.TrieMap[struct{}]
-	deniedDestinations  *cidrs.TrieMap[struct{}]
+	allowedDestinations *triemap.TrieMap[struct{}]
+	deniedDestinations  *triemap.TrieMap[struct{}]
 	udpIdleTimeout      time.Duration
 	pingTimeout         time.Duration
 	enableNAT64         bool
@@ -115,12 +115,12 @@ func New(ctx context.Context, logger *slog.Logger, srcNet, dstNet network.Networ
 		return nil, errors.New("expected userspace source network")
 	}
 
-	allowedDestinations := cidrs.NewTrieMap[struct{}]()
+	allowedDestinations := triemap.New[struct{}]()
 	for _, prefix := range conf.AllowedDestinations {
 		allowedDestinations.Insert(prefix, struct{}{})
 	}
 
-	deniedDestinations := cidrs.NewTrieMap[struct{}]()
+	deniedDestinations := triemap.New[struct{}]()
 	for _, prefix := range conf.DeniedDestinations {
 		deniedDestinations.Insert(prefix, struct{}{})
 	}

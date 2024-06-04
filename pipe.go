@@ -21,8 +21,8 @@ type pipeEndpoint struct {
 	mtu         int
 	batchSize   int
 	sendClosing atomic.Bool
-	recvCh      chan []byte
-	sendCh      chan []byte
+	recvCh      chan *Packet
+	sendCh      chan *Packet
 }
 
 // Pipe creates a pair of connected interfaces that can be used to simulate a
@@ -31,8 +31,8 @@ func Pipe(mtu, batchSize int) (Interface, Interface) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Creating buffered channels
-	aToB := make(chan []byte, batchSize)
-	bToA := make(chan []byte, batchSize)
+	aToB := make(chan *Packet, batchSize)
+	bToA := make(chan *Packet, batchSize)
 
 	a := &pipeEndpoint{
 		name:      "pipe0",
@@ -96,38 +96,40 @@ func (p *pipeEndpoint) BatchSize() int {
 	return p.batchSize
 }
 
-func (p *pipeEndpoint) Read(ctx context.Context, bufs [][]byte, sizes []int, offset int) (n int, err error) {
-	processPacket := func(idx int, packet []byte) {
-		copy(bufs[idx][offset:], packet)
-		sizes[idx] = len(packet)
+func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet) (n int, err error) {
+	processPacket := func(i int, pkt *Packet) {
+		defer pkt.Release()
+
+		packets[i].Reset()
+		packets[i].Size = copy(packets[i].Buf[:], pkt.Buf[pkt.Offset:pkt.Offset+pkt.Size])
 		n++
 	}
 
-	for i := range bufs {
+	for i := range packets {
 		if i == 0 {
 			// Read at least one packet.
 			select {
 			case <-ctx.Done():
 				return n, ctx.Err()
-			case packet, ok := <-p.recvCh:
+			case pkt, ok := <-p.recvCh:
 				if !ok {
 					// No more packets available.
 					return 0, os.ErrClosed
 				}
 
-				processPacket(i, packet)
+				processPacket(i, pkt)
 			}
 		} else {
 			select {
 			case <-ctx.Done():
 				return n, ctx.Err()
-			case packet, ok := <-p.recvCh:
+			case pkt, ok := <-p.recvCh:
 				if !ok {
 					// No more packets available.
 					return n, os.ErrClosed
 				}
 
-				processPacket(i, packet)
+				processPacket(i, pkt)
 			default:
 				// No more packets available.
 				return n, nil
@@ -138,23 +140,21 @@ func (p *pipeEndpoint) Read(ctx context.Context, bufs [][]byte, sizes []int, off
 	return n, nil
 }
 
-func (p *pipeEndpoint) Write(ctx context.Context, bufs [][]byte, sizes []int, offset int) (int, error) {
-	for i, buf := range bufs {
-		packet := make([]byte, sizes[i])
-		copy(packet, buf[offset:offset+sizes[i]])
-
+func (p *pipeEndpoint) Write(ctx context.Context, packets []*Packet) (n int, err error) {
+	for _, pkt := range packets {
 		if p.sendClosing.Load() {
-			break
+			continue
 		}
 
 		select {
 		case <-ctx.Done():
-			return i, ctx.Err()
-		case p.sendCh <- packet:
+			return 0, ctx.Err()
+		case p.sendCh <- pkt.Clone():
 			// packet sent successfully
+			n++
 		}
 	}
-	return len(bufs), nil
+	return
 }
 
 func (p *pipeEndpoint) Close() error {
