@@ -131,18 +131,19 @@ func (tun *NativeTun) Close() error {
 	return err
 }
 
-func (tun *NativeTun) Read(ctx context.Context, packets []*network.Packet) (int, error) {
+func (tun *NativeTun) Read(ctx context.Context, packets []*network.Packet, offset int) (int, error) {
 	tun.readOpMu.Lock()
 	defer tun.readOpMu.Unlock()
 
 	packets[0].Reset()
+	packets[0].Offset = offset
 
 	for {
 		if err := tun.tunFile.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
 			return 0, err
 		}
 
-		readInto := packets[0].Buf[:]
+		readInto := packets[0].Buf[offset:]
 		n, err := tun.tunFile.Read(readInto)
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {

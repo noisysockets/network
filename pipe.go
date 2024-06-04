@@ -96,12 +96,13 @@ func (p *pipeEndpoint) BatchSize() int {
 	return p.batchSize
 }
 
-func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet) (n int, err error) {
+func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet, offset int) (n int, err error) {
 	processPacket := func(i int, pkt *Packet) {
 		defer pkt.Release()
 
 		packets[i].Reset()
-		packets[i].Size = copy(packets[i].Buf[:], pkt.Buf[pkt.Offset:pkt.Offset+pkt.Size])
+		packets[i].Size = copy(packets[i].Buf[offset:], pkt.Buf[pkt.Offset:pkt.Offset+pkt.Size])
+		packets[i].Offset = offset
 		n++
 	}
 

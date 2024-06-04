@@ -337,7 +337,7 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 	net.logger.Debug("Started copying inbound packets")
 
 	for {
-		n, err := net.nic.Read(net.tasksCtx, packets)
+		n, err := net.nic.Read(net.tasksCtx, packets, 0)
 		if err != nil {
 			if errors.Is(err, stdnet.ErrClosed) ||
 				errors.Is(err, os.ErrClosed) {

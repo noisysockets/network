@@ -47,7 +47,7 @@ func TestPipe(t *testing.T) {
 
 	require.Equal(t, 1, n)
 
-	n, err = nicB.Read(ctx, packets)
+	n, err = nicB.Read(ctx, packets, 0)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
@@ -66,7 +66,7 @@ func TestPipe(t *testing.T) {
 
 	require.Equal(t, 1, n)
 
-	n, err = nicA.Read(ctx, packets)
+	n, err = nicA.Read(ctx, packets, 0)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
