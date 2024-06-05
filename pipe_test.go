@@ -37,12 +37,11 @@ func TestPipe(t *testing.T) {
 	// Send a packet from A to B.
 	// Make sure B receives it.
 
-	pkt := network.NewPacket()
-	pkt.Size = copy(pkt.Buf[:], []byte("hello"))
+	pkt := network.PacketFromBytes([]byte("hello"))
+	t.Cleanup(pkt.Release)
 
 	ctx := context.Background()
 	n, err := nicA.Write(ctx, []*network.Packet{pkt})
-	pkt.Release()
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
@@ -51,17 +50,15 @@ func TestPipe(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
-	require.Equal(t, 5, packets[0].Size)
-	require.Equal(t, "hello", string(packets[0].Buf[:5]))
+	require.Equal(t, "hello", string(packets[0].Bytes()))
 
 	// Send a packet from B to A.
 	// Make sure A receives it.
 
-	pkt = network.NewPacket()
-	pkt.Size = copy(pkt.Buf[:], []byte("world"))
+	pkt = network.PacketFromBytes([]byte("world"))
+	t.Cleanup(pkt.Release)
 
 	n, err = nicB.Write(ctx, []*network.Packet{pkt})
-	pkt.Release()
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
@@ -70,6 +67,5 @@ func TestPipe(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, 1, n)
-	require.Equal(t, 5, packets[0].Size)
-	require.Equal(t, "world", string(packets[0].Buf[:5]))
+	require.Equal(t, "world", string(packets[0].Bytes()))
 }

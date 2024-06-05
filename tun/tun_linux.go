@@ -139,12 +139,13 @@ func (tun *NativeTun) Read(ctx context.Context, packets []*network.Packet, offse
 	packets[0].Offset = offset
 
 	for {
-		if err := tun.tunFile.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		err := tun.tunFile.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		if err != nil {
 			return 0, err
 		}
 
 		readInto := packets[0].Buf[offset:]
-		n, err := tun.tunFile.Read(readInto)
+		packets[0].Size, err = tun.tunFile.Read(readInto)
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				select {
@@ -159,7 +160,6 @@ func (tun *NativeTun) Read(ctx context.Context, packets []*network.Packet, offse
 			}
 			return 0, err
 		}
-		packets[0].Size = n
 		return 1, nil
 	}
 }

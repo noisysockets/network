@@ -101,7 +101,7 @@ func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet, offset int) 
 		defer pkt.Release()
 
 		packets[i].Reset()
-		packets[i].Size = copy(packets[i].Buf[offset:], pkt.Buf[pkt.Offset:pkt.Offset+pkt.Size])
+		packets[i].Size = copy(packets[i].Buf[offset:], pkt.Bytes())
 		packets[i].Offset = offset
 		n++
 	}
