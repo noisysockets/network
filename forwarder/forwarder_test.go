@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/noisysockets/netutil/ptr"
 	"github.com/noisysockets/network/internal/testutil"
-	"github.com/noisysockets/network/internal/util"
 
 	"github.com/neilotoole/slogt"
 	"github.com/noisysockets/network"
@@ -33,7 +33,7 @@ func TestForwarder(t *testing.T) {
 	logger := slogt.New(t)
 
 	// Create what is essentially a userspace veth pair.
-	nicA, nicB := network.Pipe(1500, 16)
+	nicA, nicB := network.Pipe(nil)
 	t.Cleanup(func() {
 		require.NoError(t, nicA.Close())
 		require.NoError(t, nicB.Close())
@@ -58,7 +58,7 @@ func TestForwarder(t *testing.T) {
 			netip.MustParsePrefix("0.0.0.0/0"),
 			netip.MustParsePrefix("::/0"),
 		},
-		EnableNAT64: util.PointerTo(false),
+		EnableNAT64: ptr.To(false),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -176,7 +176,7 @@ func TestForwarderWithNAT64(t *testing.T) {
 	logger := slogt.New(t)
 
 	// Create what is essentially a userspace veth pair.
-	nicA, nicB := network.Pipe(1500, 16)
+	nicA, nicB := network.Pipe(nil)
 	t.Cleanup(func() {
 		require.NoError(t, nicA.Close())
 		require.NoError(t, nicB.Close())

@@ -48,6 +48,8 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
 	"github.com/noisysockets/netstack/pkg/waiter"
+	"github.com/noisysockets/netutil/defaults"
+	"github.com/noisysockets/netutil/ptr"
 	"github.com/noisysockets/netutil/triemap"
 	"github.com/noisysockets/network"
 	"github.com/noisysockets/network/internal/util"
@@ -80,11 +82,11 @@ var defaultForwarderConf = ForwarderConfig{
 		netip.MustParsePrefix("127.0.0.0/8"),
 		netip.MustParsePrefix("::1/128"),
 	},
-	MaxInFlightTCPConnections: util.PointerTo(2048), // TODO: tune this.
-	UDPIdleTimeout:            util.PointerTo(30 * time.Second),
-	PingTimeout:               util.PointerTo(30 * time.Second),
-	EnableNAT64:               util.PointerTo(true),
-	NAT64Prefix:               util.PointerTo(netip.MustParsePrefix("64:ff9b::/96")),
+	MaxInFlightTCPConnections: ptr.To(2048), // TODO: tune this.
+	UDPIdleTimeout:            ptr.To(30 * time.Second),
+	PingTimeout:               ptr.To(30 * time.Second),
+	EnableNAT64:               ptr.To(true),
+	NAT64Prefix:               ptr.To(netip.MustParsePrefix("64:ff9b::/96")),
 }
 
 // Forwarder is a network session forwarder.
@@ -105,7 +107,7 @@ type Forwarder struct {
 }
 
 func New(ctx context.Context, logger *slog.Logger, srcNet, dstNet network.Network, conf *ForwarderConfig) (*Forwarder, error) {
-	conf, err := util.ConfigWithDefaults(conf, &defaultForwarderConf)
+	conf, err := defaults.WithDefaults(conf, &defaultForwarderConf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to populate configuration with defaults: %w", err)
 	}

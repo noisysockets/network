@@ -13,43 +13,63 @@ import (
 	"context"
 	"os"
 	"sync/atomic"
+
+	"github.com/noisysockets/netutil/defaults"
+	"github.com/noisysockets/netutil/ptr"
 )
 
-type pipeEndpoint struct {
-	name        string
-	cancel      context.CancelFunc
-	mtu         int
-	batchSize   int
-	sendClosing atomic.Bool
-	recvCh      chan *Packet
-	sendCh      chan *Packet
+// PipeConfiguration is the configuration for a pipe.
+type PipeConfiguration struct {
+	// MTU is the maximum transmission unit of the pipe.
+	// If not specified, a default MTU of 1500 will be used.
+	MTU *int
+	// BatchSize is the maximum number of packets that can be read or written at
+	// once. If not specified, a default batch size of 16 will be used.
+	BatchSize *int
+	// PacketPool is the pool from which packets are borrowed.
+	// If not specified, an unbounded pool will be created.
+	PacketPool *PacketPool
 }
 
 // Pipe creates a pair of connected interfaces that can be used to simulate a
 // network connection. This is similar to a linux veth device.
-func Pipe(mtu, batchSize int) (Interface, Interface) {
+func Pipe(conf *PipeConfiguration) (Interface, Interface) {
+	conf, err := defaults.WithDefaults(conf, &PipeConfiguration{
+		MTU:       ptr.To(1500),
+		BatchSize: ptr.To(16),
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	if conf.PacketPool == nil {
+		conf.PacketPool = NewPacketPool(0, false)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Creating buffered channels
-	aToB := make(chan *Packet, batchSize)
-	bToA := make(chan *Packet, batchSize)
+	aToB := make(chan *Packet, *conf.BatchSize)
+	bToA := make(chan *Packet, *conf.BatchSize)
 
 	a := &pipeEndpoint{
-		name:      "pipe0",
-		cancel:    cancel,
-		mtu:       mtu,
-		batchSize: batchSize,
-		recvCh:    bToA,
-		sendCh:    aToB,
+		name:       "pipe0",
+		cancel:     cancel,
+		mtu:        *conf.MTU,
+		batchSize:  *conf.BatchSize,
+		packetPool: conf.PacketPool,
+		recvCh:     bToA,
+		sendCh:     aToB,
 	}
 
 	b := &pipeEndpoint{
-		name:      "pipe1",
-		cancel:    cancel,
-		mtu:       mtu,
-		batchSize: batchSize,
-		recvCh:    aToB,
-		sendCh:    bToA,
+		name:       "pipe1",
+		cancel:     cancel,
+		mtu:        *conf.MTU,
+		batchSize:  *conf.BatchSize,
+		packetPool: conf.PacketPool,
+		recvCh:     aToB,
+		sendCh:     bToA,
 	}
 
 	go func() {
@@ -82,6 +102,17 @@ func Pipe(mtu, batchSize int) (Interface, Interface) {
 	}()
 
 	return a, b
+}
+
+type pipeEndpoint struct {
+	name        string
+	cancel      context.CancelFunc
+	mtu         int
+	batchSize   int
+	packetPool  *PacketPool
+	sendClosing atomic.Bool
+	recvCh      chan *Packet
+	sendCh      chan *Packet
 }
 
 func (p *pipeEndpoint) Name() string {
@@ -150,7 +181,7 @@ func (p *pipeEndpoint) Write(ctx context.Context, packets []*Packet) (n int, err
 		select {
 		case <-ctx.Done():
 			return 0, ctx.Err()
-		case p.sendCh <- pkt.Clone():
+		case p.sendCh <- pkt.Clone(p.packetPool):
 			// packet sent successfully
 			n++
 		}

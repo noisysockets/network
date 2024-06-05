@@ -18,15 +18,17 @@ import (
 )
 
 func TestPipe(t *testing.T) {
-	nicA, nicB := network.Pipe(1500, 16)
+	nicA, nicB := network.Pipe(nil)
 	t.Cleanup(func() {
 		require.NoError(t, nicA.Close())
 		require.NoError(t, nicB.Close())
 	})
 
+	packetPool := network.NewPacketPool(32, false)
+
 	packets := make([]*network.Packet, nicA.BatchSize())
 	for i := 0; i < nicA.BatchSize(); i++ {
-		packets[i] = network.NewPacket()
+		packets[i] = packetPool.Borrow()
 	}
 	t.Cleanup(func() {
 		for _, pkt := range packets {
@@ -37,7 +39,8 @@ func TestPipe(t *testing.T) {
 	// Send a packet from A to B.
 	// Make sure B receives it.
 
-	pkt := network.PacketFromBytes([]byte("hello"))
+	pkt := packetPool.Borrow()
+	pkt.Size = copy(pkt.Buf[:], []byte("hello"))
 	t.Cleanup(pkt.Release)
 
 	ctx := context.Background()
@@ -55,7 +58,8 @@ func TestPipe(t *testing.T) {
 	// Send a packet from B to A.
 	// Make sure A receives it.
 
-	pkt = network.PacketFromBytes([]byte("world"))
+	pkt = packetPool.Borrow()
+	pkt.Size = copy(pkt.Buf[:], []byte("world"))
 	t.Cleanup(pkt.Release)
 
 	n, err = nicB.Write(ctx, []*network.Packet{pkt})

@@ -57,7 +57,7 @@ type DialContextFunc func(ctx context.Context, network, address string) (stdnet.
 // ResolverFactory is a function that creates a DNS resolver from the given dial function.
 type ResolverFactory func(dialContext DialContextFunc) (resolver.Resolver, error)
 
-// Forwarders can be used to forward network sessions to another network.
+// Forwarders can be used to forward sessions between networks.
 type Forwarder interface {
 	// TCPProtocolHandler forwards a TCP session.
 	TCPProtocolHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool

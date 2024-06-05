@@ -89,6 +89,9 @@ type UserspaceNetworkConfig struct {
 	// If nil, no packet capture file will be written.
 	// This is useful for debugging network issues.
 	PacketCaptureWriter io.Writer
+	// PacketPool is the pool from which packets are borrowed.
+	// If not specified, an unbounded pool will be created.
+	PacketPool *PacketPool
 }
 
 type UserspaceNetwork struct {
@@ -107,6 +110,7 @@ type UserspaceNetwork struct {
 	tasksCancel   context.CancelFunc
 	closeOnce     sync.Once
 	pinger        *pinger.Pinger
+	packetPool    *PacketPool
 }
 
 // Userspace returns a userspace Network implementation based on Netstack from
@@ -115,6 +119,11 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 	localPrefixes := triemap.New[struct{}]()
 	for _, addr := range conf.Addresses {
 		localPrefixes.Insert(addr, struct{}{})
+	}
+
+	packetPool := conf.PacketPool
+	if packetPool == nil {
+		packetPool = NewPacketPool(0, false)
 	}
 
 	stackOpts := stack.Options{
@@ -152,6 +161,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 		tasks:         tasks,
 		tasksCtx:      tasksCtx,
 		tasksCancel:   tasksCancel,
+		packetPool:    packetPool,
 	}
 
 	net.notifyHandle = net.ep.AddNotify(net)
@@ -326,7 +336,7 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 
 	packets := make([]*Packet, batchSize)
 	for i := 0; i < batchSize; i++ {
-		packets[i] = NewPacket()
+		packets[i] = net.packetPool.Borrow()
 	}
 	defer func() {
 		for _, pkt := range packets {
@@ -385,7 +395,7 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 
 	packets := make([]*Packet, batchSize)
 	for i := 0; i < batchSize; i++ {
-		packets[i] = NewPacket()
+		packets[i] = net.packetPool.Borrow()
 	}
 	defer func() {
 		for _, pkt := range packets {

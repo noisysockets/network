@@ -30,7 +30,7 @@ func TestUserspaceNetwork(t *testing.T) {
 
 	logger := slogt.New(t)
 
-	nicA, nicB := network.Pipe(1500, 16)
+	nicA, nicB := network.Pipe(nil)
 	t.Cleanup(func() {
 		_ = nicA.Close()
 		_ = nicB.Close()
@@ -103,7 +103,7 @@ func TestJumboPacket(t *testing.T) {
 
 	logger := slogt.New(t)
 
-	nicA, nicB := network.Pipe(1500, 16)
+	nicA, nicB := network.Pipe(nil)
 	t.Cleanup(func() {
 		_ = nicA.Close()
 		_ = nicB.Close()
