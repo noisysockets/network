@@ -171,7 +171,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 		net.resolver, err = conf.ResolverFactory(net.DialContext)
 		if err != nil {
 			_ = net.Close()
-			return nil, fmt.Errorf("failed to create resolver: %v", err)
+			return nil, fmt.Errorf("failed to create resolver: %w", err)
 		}
 	}
 
@@ -185,7 +185,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 	if conf.PacketCaptureWriter != nil {
 		if snifferEP, err := sniffer.NewWithWriter(ep, conf.PacketCaptureWriter, uint32(nic.MTU())); err != nil {
 			_ = net.Close()
-			return nil, fmt.Errorf("failed to create pcap sniffer: %v", err)
+			return nil, fmt.Errorf("failed to create pcap sniffer: %w", err)
 		} else {
 			ep = snifferEP
 		}
@@ -339,8 +339,9 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 		packets[i] = net.packetPool.Borrow()
 	}
 	defer func() {
-		for _, pkt := range packets {
+		for i, pkt := range packets {
 			pkt.Release()
+			packets[i] = nil
 		}
 	}()
 
@@ -359,18 +360,14 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 
 		for i := 0; i < n; i++ {
 			pkt := packets[i]
+
 			if pkt.Size > mtu {
 				net.logger.Warn("Inbound packet size exceeds MTU",
 					slog.Int("size", pkt.Size),
 					slog.Int("mtu", mtu))
-
-				// TODO: in the future if it's an IPv6 packet, we should send an
-				// ICMPv6 Packet Too Big response.
-				// If it's an IPv4 packet, we should send an ICMPv4 fragmentation
-				// needed response.
 			}
 
-			buf := pkt.Buf[pkt.Offset : pkt.Offset+pkt.Size]
+			buf := pkt.Bytes()
 
 			var protocolNumber tcpip.NetworkProtocolNumber
 			switch header.IPVersion(buf) {
@@ -392,37 +389,17 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 	}()
 
 	batchSize := net.nic.BatchSize()
+	packets := make([]*Packet, 0, batchSize)
 
-	packets := make([]*Packet, batchSize)
-	for i := 0; i < batchSize; i++ {
-		packets[i] = net.packetPool.Borrow()
-	}
-	defer func() {
-		for _, pkt := range packets {
-			pkt.Release()
-		}
-	}()
+	processPacket := func(stackPkt *stack.PacketBuffer) {
+		defer stackPkt.DecRef()
 
-	processPacket := func(idx int, pkt *stack.PacketBuffer) {
-		defer pkt.DecRef()
-
-		view := pkt.ToView()
-		packets[idx].Reset()
-		packets[idx].Size, _ = view.Read(packets[idx].Buf[:])
+		pkt := net.packetPool.Borrow()
+		view := stackPkt.ToView()
+		pkt.Size, _ = view.Read(pkt.Buf[:])
 		view.Release()
-	}
 
-	writeBatch := func(n int) error {
-		for i := 0; i < n; {
-			writtenPackets, err := net.nic.Write(net.tasksCtx, packets[:n])
-			if err != nil {
-				return fmt.Errorf("failed to write packets: %v", err)
-			}
-
-			i += writtenPackets
-		}
-
-		return nil
+		packets = append(packets, pkt)
 	}
 
 	net.logger.Debug("Started copying outbound packets")
@@ -432,30 +409,35 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 		case <-net.tasksCtx.Done():
 			return nil
 		// Wait for atleast one packet to be available.
-		case pkt, ok := <-net.outbound:
+		case stackPkt, ok := <-net.outbound:
 			if !ok {
 				return stdnet.ErrClosed
 			}
 
-			processPacket(0, pkt)
-			n := 1
+			processPacket(stackPkt)
 
 			// Then read as many packets as possible (without blocking).
-			for ; n < batchSize; n++ {
+			for i := 1; i < batchSize; i++ {
 				select {
 				case <-net.tasksCtx.Done():
 					// Any remaining undelivered packets will be dropped.
+					for i, pkt := range packets {
+						pkt.Release()
+						packets[i] = nil
+					}
+
 					return nil
-				case pkt, ok := <-net.outbound:
+				case stackPkt, ok := <-net.outbound:
 					if !ok {
-						if err := writeBatch(n); err != nil {
-							return err
+						_, err := net.nic.Write(net.tasksCtx, packets)
+						if err != nil {
+							return fmt.Errorf("failed to write packets: %w", err)
 						}
 
 						return stdnet.ErrClosed
 					}
 
-					processPacket(n, pkt)
+					processPacket(stackPkt)
 				default:
 					// No more packets to read
 					goto WRITE_BATCH
@@ -463,9 +445,12 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 			}
 
 		WRITE_BATCH:
-			if err := writeBatch(n); err != nil {
-				return err
+			_, err := net.nic.Write(net.tasksCtx, packets)
+			if err != nil {
+				return fmt.Errorf("failed to write packets: %w", err)
 			}
+
+			packets = packets[:0]
 		}
 	}
 }

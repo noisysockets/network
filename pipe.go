@@ -128,16 +128,7 @@ func (p *pipeEndpoint) BatchSize() int {
 }
 
 func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet, offset int) (n int, err error) {
-	processPacket := func(i int, pkt *Packet) {
-		defer pkt.Release()
-
-		packets[i].Reset()
-		packets[i].Size = copy(packets[i].Buf[offset:], pkt.Bytes())
-		packets[i].Offset = offset
-		n++
-	}
-
-	for i := range packets {
+	for i := 0; i < len(packets); i++ {
 		if i == 0 {
 			// Read at least one packet.
 			select {
@@ -149,7 +140,10 @@ func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet, offset int) 
 					return 0, os.ErrClosed
 				}
 
-				processPacket(i, pkt)
+				packets[i].CopyFrom(pkt, offset)
+
+				pkt.Release()
+				pkt = nil
 			}
 		} else {
 			select {
@@ -161,27 +155,35 @@ func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet, offset int) 
 					return n, os.ErrClosed
 				}
 
-				processPacket(i, pkt)
+				packets[i].CopyFrom(pkt, offset)
+				n++
+
+				pkt.Release()
+				pkt = nil
 			default:
 				// No more packets available.
-				return n, nil
+				return i, nil
 			}
 		}
 	}
 
-	return n, nil
+	return len(packets), nil
 }
 
 func (p *pipeEndpoint) Write(ctx context.Context, packets []*Packet) (n int, err error) {
-	for _, pkt := range packets {
+	for i := range packets {
+		pkt := packets[i]
+
 		if p.sendClosing.Load() {
 			continue
 		}
 
 		select {
 		case <-ctx.Done():
+			pkt.Release()
+			packets[i] = nil
 			return 0, ctx.Err()
-		case p.sendCh <- pkt.Clone(p.packetPool):
+		case p.sendCh <- pkt:
 			// packet sent successfully
 			n++
 		}

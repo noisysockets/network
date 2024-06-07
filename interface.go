@@ -53,12 +53,12 @@ type Interface interface {
 	// Read one or more packets from the interface (without any additional headers).
 	// On a successful read it returns the number of packets read. A nonzero offset
 	// can be used to instruct the interface on where to begin reading into each
-	// packet buffer (useful for reserving space for headers). Ownership of the
-	// packets is not transferred to the interface.
+	// packet buffer (useful for reserving space for headers).
 	Read(ctx context.Context, packets []*Packet, offset int) (n int, err error)
 
 	// Write one or more packets to the interface (without any additional headers).
 	// On a successful write it returns the number of packets written. Ownership
-	// of the packets is not transferred to the interface.
+	// of the packets is transferred to the interface and must not be accessed
+	// after a write operation.
 	Write(ctx context.Context, packets []*Packet) (int, error)
 }

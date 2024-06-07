@@ -168,9 +168,16 @@ func (tun *NativeTun) Write(ctx context.Context, packets []*network.Packet) (int
 	tun.writeOpMu.Lock()
 	defer tun.writeOpMu.Unlock()
 
+	defer func() {
+		for i, pkt := range packets {
+			pkt.Release()
+			packets[i] = nil
+		}
+	}()
+
 	var total int
 	for _, pkt := range packets {
-		buf := pkt.Buf[pkt.Offset : pkt.Offset+pkt.Size]
+		buf := pkt.Bytes()
 
 	ATTEMPT_WRITE:
 		if err := tun.tunFile.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {

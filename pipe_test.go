@@ -31,8 +31,9 @@ func TestPipe(t *testing.T) {
 		packets[i] = packetPool.Borrow()
 	}
 	t.Cleanup(func() {
-		for _, pkt := range packets {
+		for i, pkt := range packets {
 			pkt.Release()
+			packets[i] = nil
 		}
 	})
 
