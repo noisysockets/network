@@ -45,9 +45,11 @@ func (p *Packet) Bytes() []byte {
 	return p.Buf[p.Offset : p.Offset+p.Size]
 }
 
-// CopyFrom fills the packet with the data from another packet.
-// offset is the offset inside the packet buffer where the data should be copied.
-func (p *Packet) CopyFrom(pkt *Packet, offset int) {
-	p.Size = copy(p.Buf[offset:], pkt.Bytes())
-	p.Offset = offset
+// MoveOffset moves the packet data to a new offset inside the buffer.
+// This can be a potentially expensive operation.
+func (p *Packet) MoveOffset(offset int) {
+	if p.Offset != offset {
+		copy(p.Buf[offset:], p.Bytes())
+		p.Offset = offset
+	}
 }

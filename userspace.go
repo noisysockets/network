@@ -92,6 +92,10 @@ type UserspaceNetworkConfig struct {
 	// PacketPool is the pool from which packets are borrowed.
 	// If not specified, an unbounded pool will be created.
 	PacketPool *PacketPool
+	// PacketWriteOffset is an optional hint to write outbound packet data at a
+	// specific offset inside the buffer. This is a performance hint for
+	// WireGuard (and other protocols that need to add their own headers).
+	PacketWriteOffset int
 }
 
 type UserspaceNetwork struct {
@@ -233,7 +237,9 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 
 	// Begin copying packets to/from the NIC.
 	net.tasks.Go(net.copyInboundFromNIC)
-	net.tasks.Go(net.copyOutboundToNIC)
+	net.tasks.Go(func() error {
+		return net.copyOutboundToNIC(conf.PacketWriteOffset)
+	})
 
 	return net, nil
 }
@@ -334,21 +340,13 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 	batchSize := net.nic.BatchSize()
 	mtu := net.nic.MTU()
 
-	packets := make([]*Packet, batchSize)
-	for i := 0; i < batchSize; i++ {
-		packets[i] = net.packetPool.Borrow()
-	}
-	defer func() {
-		for i, pkt := range packets {
-			pkt.Release()
-			packets[i] = nil
-		}
-	}()
+	packets := make([]*Packet, 0, batchSize)
 
 	net.logger.Debug("Started copying inbound packets")
 
 	for {
-		n, err := net.nic.Read(net.tasksCtx, packets, 0)
+		var err error
+		packets, err = net.nic.Read(net.tasksCtx, packets, 0)
 		if err != nil {
 			if errors.Is(err, stdnet.ErrClosed) ||
 				errors.Is(err, os.ErrClosed) {
@@ -358,9 +356,7 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 			return err
 		}
 
-		for i := 0; i < n; i++ {
-			pkt := packets[i]
-
+		for i, pkt := range packets {
 			if pkt.Size > mtu {
 				net.logger.Warn("Inbound packet size exceeds MTU",
 					slog.Int("size", pkt.Size),
@@ -379,11 +375,14 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 
 			net.ep.InjectInbound(protocolNumber,
 				stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(buf)}))
+
+			pkt.Release()
+			packets[i] = nil
 		}
 	}
 }
 
-func (net *UserspaceNetwork) copyOutboundToNIC() error {
+func (net *UserspaceNetwork) copyOutboundToNIC(offset int) error {
 	defer func() {
 		net.logger.Debug("Finished copying outbound packets")
 	}()
@@ -391,12 +390,14 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 	batchSize := net.nic.BatchSize()
 	packets := make([]*Packet, 0, batchSize)
 
+	// TODO: we could copy at a specific offset to make wireguards job a lot easier.
 	processPacket := func(stackPkt *stack.PacketBuffer) {
 		defer stackPkt.DecRef()
 
 		pkt := net.packetPool.Borrow()
 		view := stackPkt.ToView()
-		pkt.Size, _ = view.Read(pkt.Buf[:])
+		pkt.Size, _ = view.Read(pkt.Buf[offset:])
+		pkt.Offset = offset
 		view.Release()
 
 		packets = append(packets, pkt)

@@ -127,47 +127,46 @@ func (p *pipeEndpoint) BatchSize() int {
 	return p.batchSize
 }
 
-func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet, offset int) (n int, err error) {
-	for i := 0; i < len(packets); i++ {
+func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet, offset int) ([]*Packet, error) {
+	if len(packets) != 0 {
+		packets = packets[:0]
+	}
+
+	for i := 0; i < p.batchSize; i++ {
 		if i == 0 {
 			// Read at least one packet.
 			select {
 			case <-ctx.Done():
-				return n, ctx.Err()
+				return nil, ctx.Err()
 			case pkt, ok := <-p.recvCh:
 				if !ok {
 					// No more packets available.
-					return 0, os.ErrClosed
+					return nil, os.ErrClosed
 				}
 
-				packets[i].CopyFrom(pkt, offset)
-
-				pkt.Release()
-				pkt = nil
+				pkt.MoveOffset(offset)
+				packets = append(packets, pkt)
 			}
 		} else {
 			select {
 			case <-ctx.Done():
-				return n, ctx.Err()
+				return packets, ctx.Err()
 			case pkt, ok := <-p.recvCh:
 				if !ok {
 					// No more packets available.
-					return n, os.ErrClosed
+					return packets, os.ErrClosed
 				}
 
-				packets[i].CopyFrom(pkt, offset)
-				n++
-
-				pkt.Release()
-				pkt = nil
+				pkt.MoveOffset(offset)
+				packets = append(packets, pkt)
 			default:
 				// No more packets available.
-				return i, nil
+				return packets, nil
 			}
 		}
 	}
 
-	return len(packets), nil
+	return packets, nil
 }
 
 func (p *pipeEndpoint) Write(ctx context.Context, packets []*Packet) (n int, err error) {

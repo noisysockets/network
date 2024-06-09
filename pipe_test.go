@@ -18,23 +18,14 @@ import (
 )
 
 func TestPipe(t *testing.T) {
-	nicA, nicB := network.Pipe(nil)
+	packetPool := network.NewPacketPool(32, false)
+
+	nicA, nicB := network.Pipe(&network.PipeConfiguration{
+		PacketPool: packetPool,
+	})
 	t.Cleanup(func() {
 		require.NoError(t, nicA.Close())
 		require.NoError(t, nicB.Close())
-	})
-
-	packetPool := network.NewPacketPool(32, false)
-
-	packets := make([]*network.Packet, nicA.BatchSize())
-	for i := 0; i < nicA.BatchSize(); i++ {
-		packets[i] = packetPool.Borrow()
-	}
-	t.Cleanup(func() {
-		for i, pkt := range packets {
-			pkt.Release()
-			packets[i] = nil
-		}
 	})
 
 	// Send a packet from A to B.
@@ -50,11 +41,20 @@ func TestPipe(t *testing.T) {
 
 	require.Equal(t, 1, n)
 
-	n, err = nicB.Read(ctx, packets, 0)
-	require.NoError(t, err)
+	{
+		packets := make([]*network.Packet, 0, nicB.BatchSize())
+		packets, err = nicB.Read(ctx, packets, 0)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			for i, pkt := range packets {
+				pkt.Release()
+				packets[i] = nil
+			}
+		})
 
-	require.Equal(t, 1, n)
-	require.Equal(t, "hello", string(packets[0].Bytes()))
+		require.Equal(t, 1, n)
+		require.Equal(t, "hello", string(packets[0].Bytes()))
+	}
 
 	// Send a packet from B to A.
 	// Make sure A receives it.
@@ -68,9 +68,18 @@ func TestPipe(t *testing.T) {
 
 	require.Equal(t, 1, n)
 
-	n, err = nicA.Read(ctx, packets, 0)
-	require.NoError(t, err)
+	{
+		packets := make([]*network.Packet, 0, nicA.BatchSize())
+		packets, err = nicA.Read(ctx, packets, 0)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			for i, pkt := range packets {
+				pkt.Release()
+				packets[i] = nil
+			}
+		})
 
-	require.Equal(t, 1, n)
-	require.Equal(t, "world", string(packets[0].Bytes()))
+		require.Equal(t, 1, n)
+		require.Equal(t, "world", string(packets[0].Bytes()))
+	}
 }
