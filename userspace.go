@@ -373,11 +373,14 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 				protocolNumber = header.IPv6ProtocolNumber
 			}
 
-			net.ep.InjectInbound(protocolNumber,
-				stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(buf)}))
-
-			pkt.Release()
+			v := buffer.NewViewWithBorrowedData(buf, func() {
+				pkt.Release()
+			})
 			packets[i] = nil
+
+			stackPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithView(v)})
+			net.ep.InjectInbound(protocolNumber, stackPkt)
+			stackPkt.DecRef()
 		}
 	}
 }
@@ -392,13 +395,12 @@ func (net *UserspaceNetwork) copyOutboundToNIC(offset int) error {
 
 	// TODO: we could copy at a specific offset to make wireguards job a lot easier.
 	processPacket := func(stackPkt *stack.PacketBuffer) {
-		defer stackPkt.DecRef()
-
 		pkt := net.packetPool.Borrow()
 		view := stackPkt.ToView()
 		pkt.Size, _ = view.Read(pkt.Buf[offset:])
 		pkt.Offset = offset
 		view.Release()
+		stackPkt.DecRef()
 
 		packets = append(packets, pkt)
 	}
