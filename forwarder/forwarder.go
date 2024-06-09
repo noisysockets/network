@@ -231,6 +231,8 @@ func (f *Forwarder) ICMPv4ProtocolHandler(id stack.TransportEndpointID, pkt *sta
 		}
 	}()
 
+	pkt.IncRef()
+
 	return true
 }
 
@@ -295,6 +297,8 @@ func (f *Forwarder) ICMPv6ProtocolHandler(id stack.TransportEndpointID, pkt *sta
 			logger.Debug("Ignoring packet", slog.Int("type", int(hdr.Type())))
 		}
 	}()
+
+	pkt.IncRef()
 
 	return true
 }

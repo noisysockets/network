@@ -67,6 +67,8 @@ type NativeTun struct {
 
 	readOpMu  sync.Mutex
 	writeOpMu sync.Mutex
+
+	packetPool *network.PacketPool
 }
 
 // CreateTUN creates a Device with the provided name and MTU.
@@ -131,36 +133,40 @@ func (tun *NativeTun) Close() error {
 	return err
 }
 
-func (tun *NativeTun) Read(ctx context.Context, packets []*network.Packet, offset int) (int, error) {
+func (tun *NativeTun) Read(ctx context.Context, packets []*network.Packet, offset int) ([]*network.Packet, error) {
 	tun.readOpMu.Lock()
 	defer tun.readOpMu.Unlock()
 
-	packets[0].Reset()
-	packets[0].Offset = offset
+	if len(packets) > 0 {
+		packets = packets[:0]
+	}
+
+	pkt := tun.packetPool.Borrow()
+	pkt.Offset = offset
 
 	for {
 		err := tun.tunFile.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		if err != nil {
-			return 0, err
+			return packets, err
 		}
 
-		readInto := packets[0].Buf[offset:]
-		packets[0].Size, err = tun.tunFile.Read(readInto)
+		pkt.Size, err = tun.tunFile.Read(pkt.Buf[offset:])
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				select {
 				case <-ctx.Done():
-					return 0, ctx.Err()
+					return packets, ctx.Err()
 				default:
 					continue
 				}
 			}
 			if errors.Is(err, syscall.EBADFD) {
-				return 0, os.ErrClosed
+				return packets, os.ErrClosed
 			}
-			return 0, err
+			return packets, err
 		}
-		return 1, nil
+		packets = append(packets, pkt)
+		return packets, nil
 	}
 }
 
@@ -168,9 +174,16 @@ func (tun *NativeTun) Write(ctx context.Context, packets []*network.Packet) (int
 	tun.writeOpMu.Lock()
 	defer tun.writeOpMu.Unlock()
 
+	defer func() {
+		for i, pkt := range packets {
+			pkt.Release()
+			packets[i] = nil
+		}
+	}()
+
 	var total int
 	for _, pkt := range packets {
-		buf := pkt.Buf[pkt.Offset : pkt.Offset+pkt.Size]
+		buf := pkt.Bytes()
 
 	ATTEMPT_WRITE:
 		if err := tun.tunFile.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {

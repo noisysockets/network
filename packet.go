@@ -40,15 +40,16 @@ func (p *Packet) Reset() {
 	p.Size = 0
 }
 
-// Clone create a caller-owned copy of the packet.
-// The pool argument is the pool from which the cloned packet will be borrowed.
-func (p *Packet) Clone(pool *PacketPool) *Packet {
-	cloned := pool.Borrow()
-	cloned.Size = copy(cloned.Buf[:], p.Buf[p.Offset:p.Offset+p.Size])
-	return cloned
-}
-
 // Bytes returns the packet data as a byte slice.
 func (p *Packet) Bytes() []byte {
 	return p.Buf[p.Offset : p.Offset+p.Size]
+}
+
+// MoveOffset moves the packet data to a new offset inside the buffer.
+// This can be a potentially expensive operation.
+func (p *Packet) MoveOffset(offset int) {
+	if p.Offset != offset {
+		copy(p.Buf[offset:], p.Bytes())
+		p.Offset = offset
+	}
 }

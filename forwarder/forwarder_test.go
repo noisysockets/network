@@ -20,11 +20,11 @@ import (
 	"time"
 
 	"github.com/noisysockets/netutil/ptr"
-	"github.com/noisysockets/network/internal/testutil"
 
 	"github.com/neilotoole/slogt"
 	"github.com/noisysockets/network"
 	"github.com/noisysockets/network/forwarder"
+	"github.com/noisysockets/network/internal/testutil"
 	"github.com/noisysockets/resolver"
 	"github.com/stretchr/testify/require"
 )

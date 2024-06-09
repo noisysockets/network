@@ -51,14 +51,16 @@ type Interface interface {
 	BatchSize() int
 
 	// Read one or more packets from the interface (without any additional headers).
-	// On a successful read it returns the number of packets read. A nonzero offset
-	// can be used to instruct the interface on where to begin reading into each
-	// packet buffer (useful for reserving space for headers). Ownership of the
-	// packets is not transferred to the interface.
-	Read(ctx context.Context, packets []*Packet, offset int) (n int, err error)
+	// On a successful read it returns a slice of packets of up-to length batchSize.
+	// The caller is responsible for releasing the packets back to the pool. The
+	// caller can optionally supply an unallocated packet slice (eg. from a previous
+	// call to Read()) that will be used to store the read packets. This allows
+	// avoiding allocating the packet slice on each read.
+	Read(ctx context.Context, packets []*Packet, offset int) ([]*Packet, error)
 
 	// Write one or more packets to the interface (without any additional headers).
 	// On a successful write it returns the number of packets written. Ownership
-	// of the packets is not transferred to the interface.
+	// of the packets is transferred to the interface and must not be accessed
+	// after a write operation.
 	Write(ctx context.Context, packets []*Packet) (int, error)
 }

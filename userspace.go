@@ -92,6 +92,10 @@ type UserspaceNetworkConfig struct {
 	// PacketPool is the pool from which packets are borrowed.
 	// If not specified, an unbounded pool will be created.
 	PacketPool *PacketPool
+	// PacketWriteOffset is an optional hint to write outbound packet data at a
+	// specific offset inside the buffer. This is a performance hint for
+	// WireGuard (and other protocols that need to add their own headers).
+	PacketWriteOffset int
 }
 
 type UserspaceNetwork struct {
@@ -171,7 +175,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 		net.resolver, err = conf.ResolverFactory(net.DialContext)
 		if err != nil {
 			_ = net.Close()
-			return nil, fmt.Errorf("failed to create resolver: %v", err)
+			return nil, fmt.Errorf("failed to create resolver: %w", err)
 		}
 	}
 
@@ -185,7 +189,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 	if conf.PacketCaptureWriter != nil {
 		if snifferEP, err := sniffer.NewWithWriter(ep, conf.PacketCaptureWriter, uint32(nic.MTU())); err != nil {
 			_ = net.Close()
-			return nil, fmt.Errorf("failed to create pcap sniffer: %v", err)
+			return nil, fmt.Errorf("failed to create pcap sniffer: %w", err)
 		} else {
 			ep = snifferEP
 		}
@@ -233,7 +237,9 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 
 	// Begin copying packets to/from the NIC.
 	net.tasks.Go(net.copyInboundFromNIC)
-	net.tasks.Go(net.copyOutboundToNIC)
+	net.tasks.Go(func() error {
+		return net.copyOutboundToNIC(conf.PacketWriteOffset)
+	})
 
 	return net, nil
 }
@@ -334,20 +340,13 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 	batchSize := net.nic.BatchSize()
 	mtu := net.nic.MTU()
 
-	packets := make([]*Packet, batchSize)
-	for i := 0; i < batchSize; i++ {
-		packets[i] = net.packetPool.Borrow()
-	}
-	defer func() {
-		for _, pkt := range packets {
-			pkt.Release()
-		}
-	}()
+	packets := make([]*Packet, 0, batchSize)
 
 	net.logger.Debug("Started copying inbound packets")
 
 	for {
-		n, err := net.nic.Read(net.tasksCtx, packets, 0)
+		var err error
+		packets, err = net.nic.Read(net.tasksCtx, packets, 0)
 		if err != nil {
 			if errors.Is(err, stdnet.ErrClosed) ||
 				errors.Is(err, os.ErrClosed) {
@@ -357,20 +356,14 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 			return err
 		}
 
-		for i := 0; i < n; i++ {
-			pkt := packets[i]
+		for i, pkt := range packets {
 			if pkt.Size > mtu {
 				net.logger.Warn("Inbound packet size exceeds MTU",
 					slog.Int("size", pkt.Size),
 					slog.Int("mtu", mtu))
-
-				// TODO: in the future if it's an IPv6 packet, we should send an
-				// ICMPv6 Packet Too Big response.
-				// If it's an IPv4 packet, we should send an ICMPv4 fragmentation
-				// needed response.
 			}
 
-			buf := pkt.Buf[pkt.Offset : pkt.Offset+pkt.Size]
+			buf := pkt.Bytes()
 
 			var protocolNumber tcpip.NetworkProtocolNumber
 			switch header.IPVersion(buf) {
@@ -380,49 +373,36 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 				protocolNumber = header.IPv6ProtocolNumber
 			}
 
-			net.ep.InjectInbound(protocolNumber,
-				stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(buf)}))
+			v := buffer.NewViewWithBorrowedData(buf, func() {
+				pkt.Release()
+			})
+			packets[i] = nil
+
+			stackPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithView(v)})
+			net.ep.InjectInbound(protocolNumber, stackPkt)
+			stackPkt.DecRef()
 		}
 	}
 }
 
-func (net *UserspaceNetwork) copyOutboundToNIC() error {
+func (net *UserspaceNetwork) copyOutboundToNIC(offset int) error {
 	defer func() {
 		net.logger.Debug("Finished copying outbound packets")
 	}()
 
 	batchSize := net.nic.BatchSize()
+	packets := make([]*Packet, 0, batchSize)
 
-	packets := make([]*Packet, batchSize)
-	for i := 0; i < batchSize; i++ {
-		packets[i] = net.packetPool.Borrow()
-	}
-	defer func() {
-		for _, pkt := range packets {
-			pkt.Release()
-		}
-	}()
-
-	processPacket := func(idx int, pkt *stack.PacketBuffer) {
-		defer pkt.DecRef()
-
-		view := pkt.ToView()
-		packets[idx].Reset()
-		packets[idx].Size, _ = view.Read(packets[idx].Buf[:])
+	// TODO: we could copy at a specific offset to make wireguards job a lot easier.
+	processPacket := func(stackPkt *stack.PacketBuffer) {
+		pkt := net.packetPool.Borrow()
+		view := stackPkt.ToView()
+		pkt.Size, _ = view.Read(pkt.Buf[offset:])
+		pkt.Offset = offset
 		view.Release()
-	}
+		stackPkt.DecRef()
 
-	writeBatch := func(n int) error {
-		for i := 0; i < n; {
-			writtenPackets, err := net.nic.Write(net.tasksCtx, packets[:n])
-			if err != nil {
-				return fmt.Errorf("failed to write packets: %v", err)
-			}
-
-			i += writtenPackets
-		}
-
-		return nil
+		packets = append(packets, pkt)
 	}
 
 	net.logger.Debug("Started copying outbound packets")
@@ -432,30 +412,35 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 		case <-net.tasksCtx.Done():
 			return nil
 		// Wait for atleast one packet to be available.
-		case pkt, ok := <-net.outbound:
+		case stackPkt, ok := <-net.outbound:
 			if !ok {
 				return stdnet.ErrClosed
 			}
 
-			processPacket(0, pkt)
-			n := 1
+			processPacket(stackPkt)
 
 			// Then read as many packets as possible (without blocking).
-			for ; n < batchSize; n++ {
+			for i := 1; i < batchSize; i++ {
 				select {
 				case <-net.tasksCtx.Done():
 					// Any remaining undelivered packets will be dropped.
+					for i, pkt := range packets {
+						pkt.Release()
+						packets[i] = nil
+					}
+
 					return nil
-				case pkt, ok := <-net.outbound:
+				case stackPkt, ok := <-net.outbound:
 					if !ok {
-						if err := writeBatch(n); err != nil {
-							return err
+						_, err := net.nic.Write(net.tasksCtx, packets)
+						if err != nil {
+							return fmt.Errorf("failed to write packets: %w", err)
 						}
 
 						return stdnet.ErrClosed
 					}
 
-					processPacket(n, pkt)
+					processPacket(stackPkt)
 				default:
 					// No more packets to read
 					goto WRITE_BATCH
@@ -463,9 +448,12 @@ func (net *UserspaceNetwork) copyOutboundToNIC() error {
 			}
 
 		WRITE_BATCH:
-			if err := writeBatch(n); err != nil {
-				return err
+			_, err := net.nic.Write(net.tasksCtx, packets)
+			if err != nil {
+				return fmt.Errorf("failed to write packets: %w", err)
 			}
+
+			packets = packets[:0]
 		}
 	}
 }
