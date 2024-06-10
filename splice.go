@@ -50,7 +50,9 @@ func copyPackets(ctx context.Context, dst, src Interface) error {
 		for written := 0; written < len(packets); {
 			n, err := dst.Write(ctx, packets)
 			written += n
-			packets = packets[n:]
+			if n < len(packets) {
+				packets = packets[n:]
+			}
 
 			if err != nil {
 				for i, pkt := range packets {
