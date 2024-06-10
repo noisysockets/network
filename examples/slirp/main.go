@@ -56,7 +56,9 @@ func main() {
 	logger.Info("Creating TUN interface", slog.String("name", "nsh0"))
 
 	ctx := context.Background()
-	nic, err := tun.CreateTUN(ctx, logger, "nsh0", tun.DefaultMTU)
+	nic, err := tun.Create(ctx, logger, tun.Configuration{
+		Name: "nsh0",
+	})
 	if err != nil {
 		logger.Error("Failed to create TUN interface", slog.Any("error", err))
 		os.Exit(1)

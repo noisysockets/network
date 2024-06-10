@@ -33,4 +33,18 @@
 // The TUN device is intended only for development and testing purposes.
 package tun
 
+import "github.com/noisysockets/network"
+
 const DefaultMTU = 1280
+
+// Configuration is the configuration for a TUN device.
+type Configuration struct {
+	// Name is the name of the TUN device.
+	Name string
+	// MTU is the maximum transmission unit of the TUN device.
+	// If MTU is nil, DefaultMTU is used.
+	MTU *int
+	// PacketPool is the pool from which packets are borrowed.
+	// If not specified, an unbounded pool will be created.
+	PacketPool *network.PacketPool
+}

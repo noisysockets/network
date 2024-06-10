@@ -44,6 +44,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/noisysockets/netutil/defaults"
+	"github.com/noisysockets/netutil/ptr"
 	"github.com/noisysockets/network"
 	"golang.org/x/sys/unix"
 )
@@ -71,17 +73,30 @@ type NativeTun struct {
 	packetPool *network.PacketPool
 }
 
-// CreateTUN creates a Device with the provided name and MTU.
-func CreateTUN(ctx context.Context, logger *slog.Logger, name string, mtu int) (network.Interface, error) {
+// Create creates a new TUN device with the specified configuration.
+func Create(ctx context.Context, logger *slog.Logger, conf Configuration) (network.Interface, error) {
+	confWithDefaults, err := defaults.WithDefaults(&conf, &Configuration{
+		MTU:        ptr.To(DefaultMTU),
+		PacketPool: network.NewPacketPool(0, false),
+	})
+	if err != nil {
+		return nil, err
+	}
+	conf = *confWithDefaults
+
+	if conf.Name == "" {
+		return nil, errors.New("TUN device name must be specified")
+	}
+
 	nfd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("CreateTUN(%q) failed; %s does not exist", name, cloneDevicePath)
+			return nil, errors.New("TUN/TAP device not found (missing CONFIG_TUN)")
 		}
 		return nil, err
 	}
 
-	ifr, err := unix.NewIfreq(name)
+	ifr, err := unix.NewIfreq(conf.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -99,25 +114,21 @@ func CreateTUN(ctx context.Context, logger *slog.Logger, name string, mtu int) (
 	}
 
 	// Note that the above -- open,ioctl,nonblock -- must happen prior to handing it to netpoll as below this line.
+	file := os.NewFile(uintptr(nfd), cloneDevicePath)
 
-	fd := os.NewFile(uintptr(nfd), cloneDevicePath)
-	return CreateTUNFromFile(ctx, logger, fd, mtu)
-}
-
-// CreateTUNFromFile creates a Device from an os.File with the provided MTU.
-func CreateTUNFromFile(ctx context.Context, logger *slog.Logger, file *os.File, mtu int) (network.Interface, error) {
 	tun := &NativeTun{
-		tunFile: file,
+		logger:     logger,
+		tunFile:    file,
+		packetPool: conf.PacketPool,
 	}
 
-	var err error
 	tun.name, err = tun.nameSlow()
 	if err != nil {
 		_ = tun.Close()
 		return nil, err
 	}
 
-	if err := tun.setMTU(mtu); err != nil {
+	if err := tun.setMTU(*conf.MTU); err != nil {
 		_ = tun.Close()
 		return nil, err
 	}

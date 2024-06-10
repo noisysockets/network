@@ -48,10 +48,14 @@ func main() {
 		Level: slog.LevelDebug,
 	}))
 
+	packetPool := network.NewPacketPool(0, false)
+
 	logger.Info("Creating TUN interface", slog.String("name", "nsh0"))
 
 	ctx := context.Background()
-	nic, err := tun.CreateTUN(ctx, logger, "nsh0", tun.DefaultMTU)
+	nic, err := tun.Create(ctx, logger, tun.Configuration{
+		Name: "nsh0",
+	})
 	if err != nil {
 		logger.Error("Failed to create TUN interface", slog.Any("error", err))
 		os.Exit(1)
@@ -66,6 +70,7 @@ func main() {
 			netip.MustParsePrefix("100.64.0.1/32"),
 			netip.MustParsePrefix("fdff:7061:ac89::1/128"),
 		},
+		PacketPool: packetPool,
 	})
 	if err != nil {
 		logger.Error("Failed to create userspace network", slog.Any("error", err))
