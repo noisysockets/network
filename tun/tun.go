@@ -30,17 +30,19 @@
  */
 
 // Package tun provides a TUN device implementation for noisysockets.
-// The TUN device is intended only for development and testing purposes.
 package tun
 
-import "github.com/noisysockets/network"
+import (
+	"github.com/noisysockets/network"
+)
 
-const DefaultMTU = 1280
+const (
+	DefaultBatchSize = 128
+	DefaultMTU       = 1280
+)
 
 // Configuration is the configuration for a TUN device.
 type Configuration struct {
-	// Name is the name of the TUN device.
-	Name string
 	// MTU is the maximum transmission unit of the TUN device.
 	// If MTU is nil, DefaultMTU is used.
 	MTU *int

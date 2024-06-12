@@ -53,7 +53,6 @@ func Pipe(conf *PipeConfiguration) (Interface, Interface) {
 	bToA := make(chan *Packet, *conf.BatchSize)
 
 	a := &pipeEndpoint{
-		name:       "pipe0",
 		cancel:     cancel,
 		mtu:        *conf.MTU,
 		batchSize:  *conf.BatchSize,
@@ -63,7 +62,6 @@ func Pipe(conf *PipeConfiguration) (Interface, Interface) {
 	}
 
 	b := &pipeEndpoint{
-		name:       "pipe1",
 		cancel:     cancel,
 		mtu:        *conf.MTU,
 		batchSize:  *conf.BatchSize,
@@ -105,7 +103,6 @@ func Pipe(conf *PipeConfiguration) (Interface, Interface) {
 }
 
 type pipeEndpoint struct {
-	name        string
 	cancel      context.CancelFunc
 	mtu         int
 	batchSize   int
@@ -113,10 +110,6 @@ type pipeEndpoint struct {
 	sendClosing atomic.Bool
 	recvCh      chan *Packet
 	sendCh      chan *Packet
-}
-
-func (p *pipeEndpoint) Name() string {
-	return p.name
 }
 
 func (p *pipeEndpoint) MTU() int {

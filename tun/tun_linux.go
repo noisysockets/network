@@ -42,53 +42,50 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/noisysockets/netutil/defaults"
 	"github.com/noisysockets/netutil/ptr"
 	"github.com/noisysockets/network"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	cloneDevicePath = "/dev/net/tun"
-	ifReqSize       = unix.IFNAMSIZ + 64
+	// TODO: support TSO with ECN bits
+	tunTCPOffloads = unix.TUN_F_CSUM | unix.TUN_F_TSO4 | unix.TUN_F_TSO6
+	tunUDPOffloads = unix.TUN_F_USO4 | unix.TUN_F_USO6
 )
 
-var _ network.Interface = (*NativeTun)(nil)
+var _ network.Interface = (*Interface)(nil)
 
-// NativeTun is a TUN device implementation for linux.
-type NativeTun struct {
-	logger *slog.Logger
-
-	tunFile *os.File
-
-	closeOnce sync.Once
-
-	name string // name of interface
-
-	readOpMu  sync.Mutex
-	writeOpMu sync.Mutex
-
-	packetPool *network.PacketPool
+// Interface is a TUN network interface implementation for linux.
+type Interface struct {
+	logger      *slog.Logger
+	name        string
+	packetPool  *network.PacketPool
+	tunFile     *os.File
+	batchSize   int
+	vnetHdr     bool
+	udpGSO      bool
+	readOpMu    sync.Mutex                                    // readOpMu guards readBuff
+	vnetReadBuf [VirtioNetHdrLen + network.MaxPacketSize]byte // if vnetHdr every read() is prefixed by virtioNetHdr
+	writeOpMu   sync.Mutex                                    // writeOpMu guards toWrite, tcpGROTable
+	toWrite     []int
+	tcpGROTable *tcpGROTable
+	udpGROTable *udpGROTable
 }
 
 // Create creates a new TUN device with the specified configuration.
-func Create(ctx context.Context, logger *slog.Logger, conf Configuration) (network.Interface, error) {
-	confWithDefaults, err := defaults.WithDefaults(&conf, &Configuration{
+func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configuration) (network.Interface, error) {
+	conf, err := defaults.WithDefaults(conf, &Configuration{
 		MTU:        ptr.To(DefaultMTU),
 		PacketPool: network.NewPacketPool(0, false),
 	})
 	if err != nil {
 		return nil, err
 	}
-	conf = *confWithDefaults
 
-	if conf.Name == "" {
-		return nil, errors.New("TUN device name must be specified")
-	}
-
-	nfd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, errors.New("TUN/TAP device not found (missing CONFIG_TUN)")
@@ -96,72 +93,100 @@ func Create(ctx context.Context, logger *slog.Logger, conf Configuration) (netwo
 		return nil, err
 	}
 
-	ifr, err := unix.NewIfreq(conf.Name)
+	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+
+	ifr, err := unix.NewIfreq(name)
 	if err != nil {
 		return nil, err
 	}
 
-	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
-	err = unix.IoctlIfreq(nfd, unix.TUNSETIFF, ifr)
+	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
+	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
+		return nil, err
+	}
+
+	if err := unix.IoctlIfreq(fd, unix.TUNGETIFF, ifr); err != nil {
+		return nil, err
+	}
+
+	var batchSize int
+	var vnetHdr, udpGSO bool
+	if ifr.Uint16()&unix.IFF_VNET_HDR != 0 {
+		// tunTCPOffloads were added in Linux v2.6. We require their support
+		// if IFF_VNET_HDR is set.
+		if err := unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, tunTCPOffloads); err != nil {
+			_ = unix.Close(fd)
+			return nil, err
+		}
+		vnetHdr = true
+		batchSize = DefaultBatchSize
+		// tunUDPOffloads were added in Linux v6.2. We do not return an
+		// error if they are unsupported at runtime.
+		udpGSO = unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, tunTCPOffloads|tunUDPOffloads) == nil
+	} else {
+		batchSize = 1
+	}
+
+	link, err := netlink.LinkByName(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to find link %s: %w", name, err)
 	}
 
-	err = unix.SetNonblock(nfd, true)
-	if err != nil {
-		unix.Close(nfd)
-		return nil, err
+	if err := netlink.LinkSetMTU(link, *conf.MTU); err != nil {
+		return nil, fmt.Errorf("failed to set MTU for %s: %w", name, err)
 	}
 
-	// Note that the above -- open,ioctl,nonblock -- must happen prior to handing it to netpoll as below this line.
-	file := os.NewFile(uintptr(nfd), cloneDevicePath)
-
-	tun := &NativeTun{
-		logger:     logger,
-		tunFile:    file,
-		packetPool: conf.PacketPool,
+	if err := netlink.LinkSetUp(link); err != nil {
+		return nil, fmt.Errorf("failed to set %s up: %w", name, err)
 	}
 
-	tun.name, err = tun.nameSlow()
-	if err != nil {
-		_ = tun.Close()
-		return nil, err
-	}
-
-	if err := tun.setMTU(*conf.MTU); err != nil {
-		_ = tun.Close()
-		return nil, err
-	}
-
-	return tun, nil
+	return &Interface{
+		logger:      logger,
+		name:        name,
+		packetPool:  conf.PacketPool,
+		tunFile:     os.NewFile(uintptr(fd), "/dev/net/tun"),
+		batchSize:   batchSize,
+		vnetHdr:     vnetHdr,
+		udpGSO:      udpGSO,
+		tcpGROTable: newTCPGROTable(batchSize),
+		udpGROTable: newUDPGROTable(batchSize),
+		toWrite:     make([]int, 0, batchSize),
+	}, nil
 }
 
-func (tun *NativeTun) Close() error {
-	var err error
-	tun.closeOnce.Do(func() {
-		err = tun.tunFile.Close()
-	})
-	return err
+func (nic *Interface) Close() error {
+	return nic.tunFile.Close()
 }
 
-func (tun *NativeTun) Read(ctx context.Context, packets []*network.Packet, offset int) ([]*network.Packet, error) {
-	tun.readOpMu.Lock()
-	defer tun.readOpMu.Unlock()
+func (nic *Interface) Read(ctx context.Context, packets []*network.Packet, offset int) ([]*network.Packet, error) {
+	nic.readOpMu.Lock()
+	defer nic.readOpMu.Unlock()
 
 	if len(packets) > 0 {
 		packets = packets[:0]
 	}
 
-	pkt := tun.packetPool.Borrow()
-	pkt.Offset = offset
+	var pkt *network.Packet
+	var readInto []byte
+
+	if !nic.vnetHdr {
+		pkt = nic.packetPool.Borrow()
+		pkt.Offset = offset
+		readInto = pkt.Buf[offset:]
+	} else {
+		readInto = nic.vnetReadBuf[:]
+	}
 
 	for {
-		err := tun.tunFile.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		err := nic.tunFile.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		if err != nil {
 			return packets, err
 		}
 
-		pkt.Size, err = tun.tunFile.Read(pkt.Buf[offset:])
+		n, err := nic.tunFile.Read(readInto)
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				select {
@@ -176,14 +201,24 @@ func (tun *NativeTun) Read(ctx context.Context, packets []*network.Packet, offse
 			}
 			return packets, err
 		}
-		packets = append(packets, pkt)
-		return packets, nil
+
+		if nic.vnetHdr {
+			return nic.handleGSO(readInto[:n], packets, offset)
+		} else {
+			pkt.Size = n
+			packets = append(packets, pkt)
+			return packets, nil
+		}
 	}
 }
 
-func (tun *NativeTun) Write(ctx context.Context, packets []*network.Packet) (int, error) {
-	tun.writeOpMu.Lock()
-	defer tun.writeOpMu.Unlock()
+func (nic *Interface) Write(ctx context.Context, packets []*network.Packet) (int, error) {
+	nic.writeOpMu.Lock()
+	defer func() {
+		nic.tcpGROTable.reset()
+		nic.udpGROTable.reset()
+		nic.writeOpMu.Unlock()
+	}()
 
 	defer func() {
 		for i, pkt := range packets {
@@ -192,16 +227,30 @@ func (tun *NativeTun) Write(ctx context.Context, packets []*network.Packet) (int
 		}
 	}()
 
+	if nic.vnetHdr {
+		var err error
+		nic.toWrite, err = nic.handleGRO(packets, nic.toWrite[:0])
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		nic.toWrite = nic.toWrite[:0]
+		for pktIndex := range packets {
+			nic.toWrite = append(nic.toWrite, pktIndex)
+		}
+	}
+
 	var total int
-	for _, pkt := range packets {
+	for _, pktIndex := range nic.toWrite {
+		pkt := packets[pktIndex]
 		buf := pkt.Bytes()
 
 	ATTEMPT_WRITE:
-		if err := tun.tunFile.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		if err := nic.tunFile.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
 			return total, err
 		}
 
-		n, err := tun.tunFile.Write(buf)
+		n, err := nic.tunFile.Write(buf)
 		total += n
 
 		if err != nil {
@@ -228,102 +277,17 @@ func (tun *NativeTun) Write(ctx context.Context, packets []*network.Packet) (int
 	return total, nil
 }
 
-func (tun *NativeTun) MTU() int {
-	name := tun.Name()
-
-	// open datagram socket
-	fd, err := unix.Socket(
-		unix.AF_INET,
-		unix.SOCK_DGRAM|unix.SOCK_CLOEXEC,
-		0,
-	)
+func (nic *Interface) MTU() int {
+	link, err := netlink.LinkByName(nic.name)
 	if err != nil {
-		tun.logger.Warn("Failed to open datagram socket",
-			slog.Any("error", err))
-		return DefaultMTU
+		nic.logger.Warn("Failed to find link",
+			slog.Any("name", nic.name), slog.Any("error", err))
+		return DefaultMTU // Fallback to the minimal default MTU
 	}
 
-	defer unix.Close(fd)
-
-	// do ioctl call
-
-	var ifr [ifReqSize]byte
-	copy(ifr[:], name)
-	_, _, errno := unix.Syscall(
-		unix.SYS_IOCTL,
-		uintptr(fd),
-		uintptr(unix.SIOCGIFMTU),
-		uintptr(unsafe.Pointer(&ifr[0])),
-	)
-	if errno != 0 {
-		tun.logger.Warn("Failed to get MTU of TUN device",
-			slog.Any("error", errno))
-		return DefaultMTU
-	}
-
-	return int(*(*int32)(unsafe.Pointer(&ifr[unix.IFNAMSIZ])))
+	return link.Attrs().MTU
 }
 
-func (tun *NativeTun) Name() string {
-	return tun.name
-}
-
-func (tun *NativeTun) BatchSize() int {
-	return 1
-}
-
-func (tun *NativeTun) setMTU(n int) error {
-	name := tun.Name()
-
-	// open datagram socket
-	fd, err := unix.Socket(
-		unix.AF_INET,
-		unix.SOCK_DGRAM|unix.SOCK_CLOEXEC,
-		0,
-	)
-	if err != nil {
-		return err
-	}
-
-	defer unix.Close(fd)
-
-	// do ioctl call
-	var ifr [ifReqSize]byte
-	copy(ifr[:], name)
-	*(*uint32)(unsafe.Pointer(&ifr[unix.IFNAMSIZ])) = uint32(n)
-	_, _, errno := unix.Syscall(
-		unix.SYS_IOCTL,
-		uintptr(fd),
-		uintptr(unix.SIOCSIFMTU),
-		uintptr(unsafe.Pointer(&ifr[0])),
-	)
-	if errno != 0 {
-		return fmt.Errorf("failed to set MTU of TUN device: %w", errno)
-	}
-
-	return nil
-}
-
-func (tun *NativeTun) nameSlow() (string, error) {
-	sysconn, err := tun.tunFile.SyscallConn()
-	if err != nil {
-		return "", err
-	}
-	var ifr [ifReqSize]byte
-	var errno syscall.Errno
-	err = sysconn.Control(func(fd uintptr) {
-		_, _, errno = unix.Syscall(
-			unix.SYS_IOCTL,
-			fd,
-			uintptr(unix.TUNGETIFF),
-			uintptr(unsafe.Pointer(&ifr[0])),
-		)
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to get name of TUN device: %w", err)
-	}
-	if errno != 0 {
-		return "", fmt.Errorf("failed to get name of TUN device: %w", errno)
-	}
-	return unix.ByteSliceToString(ifr[:]), nil
+func (nic *Interface) BatchSize() int {
+	return nic.batchSize
 }

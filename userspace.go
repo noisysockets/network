@@ -353,6 +353,10 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 				return nil
 			}
 
+			if !errors.Is(err, context.Canceled) {
+				net.logger.Error("Failed to read packets from NIC", slog.Any("error", err))
+			}
+
 			return err
 		}
 
@@ -434,6 +438,10 @@ func (net *UserspaceNetwork) copyOutboundToNIC(offset int) error {
 					if !ok {
 						_, err := net.nic.Write(net.tasksCtx, packets)
 						if err != nil {
+							if !errors.Is(err, context.Canceled) {
+								net.logger.Error("Failed to write packets to NIC", slog.Any("error", err))
+							}
+
 							return fmt.Errorf("failed to write packets: %w", err)
 						}
 
@@ -450,6 +458,10 @@ func (net *UserspaceNetwork) copyOutboundToNIC(offset int) error {
 		WRITE_BATCH:
 			_, err := net.nic.Write(net.tasksCtx, packets)
 			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					net.logger.Error("Failed to write packets to NIC", slog.Any("error", err))
+				}
+
 				return fmt.Errorf("failed to write packets: %w", err)
 			}
 

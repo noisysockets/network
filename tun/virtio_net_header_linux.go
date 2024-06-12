@@ -1,3 +1,5 @@
+//go:build linux
+
 // SPDX-License-Identifier: MPL-2.0
 /*
  * Copyright (C) 2024 The Noisy Sockets Authors.
@@ -29,35 +31,42 @@
  * SOFTWARE.
  */
 
-package network
+package tun
 
 import (
-	"context"
 	"io"
+	"unsafe"
 )
 
-// Interface is a network interface.
-type Interface interface {
-	io.Closer
+const (
+	// VirtioNetHdrLen is the length in bytes of virtioNetHdr. This matches the
+	// shape of the C ABI for its kernel counterpart -- sizeof(virtio_net_hdr).
+	VirtioNetHdrLen = int(unsafe.Sizeof(virtioNetHdr{}))
+)
 
-	// MTU returns the MTU of the interface.
-	MTU() int
+// virtioNetHdr is defined in the kernel in include/uapi/linux/virtio_net.h. The
+// kernel symbol is virtio_net_hdr.
+type virtioNetHdr struct {
+	flags      uint8
+	gsoType    uint8
+	hdrLen     uint16
+	gsoSize    uint16
+	csumStart  uint16
+	csumOffset uint16
+}
 
-	// BatchSize returns the preferred/max number of packets that can be read or
-	// written in a single read/write call.
-	BatchSize() int
+func (v *virtioNetHdr) decode(b []byte) error {
+	if len(b) < VirtioNetHdrLen {
+		return io.ErrShortBuffer
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(v)), VirtioNetHdrLen), b[:VirtioNetHdrLen])
+	return nil
+}
 
-	// Read one or more packets from the interface (without any additional headers).
-	// On a successful read it returns a slice of packets of up-to length batchSize.
-	// The caller is responsible for releasing the packets back to the pool. The
-	// caller can optionally supply an unallocated packet slice (eg. from a previous
-	// call to Read()) that will be used to store the read packets. This allows
-	// avoiding allocating the packet slice on each read.
-	Read(ctx context.Context, packets []*Packet, offset int) ([]*Packet, error)
-
-	// Write one or more packets to the interface (without any additional headers).
-	// On a successful write it returns the number of packets written. Ownership
-	// of the packets is transferred to the interface and must not be accessed
-	// after a write operation.
-	Write(ctx context.Context, packets []*Packet) (int, error)
+func (v *virtioNetHdr) encode(b []byte) error {
+	if len(b) < VirtioNetHdrLen {
+		return io.ErrShortBuffer
+	}
+	copy(b[:VirtioNetHdrLen], unsafe.Slice((*byte)(unsafe.Pointer(v)), VirtioNetHdrLen))
+	return nil
 }
