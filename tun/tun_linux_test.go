@@ -27,6 +27,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/neilotoole/slogt"
 	"github.com/noisysockets/network"
+	"github.com/noisysockets/pinger"
 	"github.com/noisysockets/resolver"
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
@@ -165,6 +166,24 @@ func TestTunInterface(t *testing.T) {
 
 			require.Len(t, addrs, 1)
 			require.Equal(t, "fdff:7061:ac89::1", addrs[0].String())
+		}
+	})
+
+	t.Run("icmp4", func(t *testing.T) {
+		p := pinger.New()
+
+		for i := 0; i < nRequests; i++ {
+			err := p.Ping(ctx, "ip4", "100.64.0.1")
+			require.NoError(t, err)
+		}
+	})
+
+	t.Run("icmp6", func(t *testing.T) {
+		p := pinger.New()
+
+		for i := 0; i < nRequests; i++ {
+			err := p.Ping(ctx, "ip6", "fdff:7061:ac89::1")
+			require.NoError(t, err)
 		}
 	})
 }
