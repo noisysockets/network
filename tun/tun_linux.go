@@ -31,6 +31,7 @@
  * SOFTWARE.
  */
 
+// Package tun provides a TUN device implementation for noisysockets.
 package tun
 
 import (
@@ -51,12 +52,21 @@ import (
 )
 
 const (
-	// TODO: support TSO with ECN bits
-	tunTCPOffloads = unix.TUN_F_CSUM | unix.TUN_F_TSO4 | unix.TUN_F_TSO6
-	tunUDPOffloads = unix.TUN_F_USO4 | unix.TUN_F_USO6
+	DefaultBatchSize = 128
+	DefaultMTU       = 1280
 )
 
 var _ network.Interface = (*Interface)(nil)
+
+// Configuration is the configuration for a TUN device.
+type Configuration struct {
+	// MTU is the maximum transmission unit of the TUN device.
+	// If MTU is nil, DefaultMTU is used.
+	MTU *int
+	// PacketPool is the pool from which packets are borrowed.
+	// If not specified, an unbounded pool will be created.
+	PacketPool *network.PacketPool
+}
 
 // Interface is a TUN network interface implementation for linux.
 type Interface struct {
@@ -115,6 +125,12 @@ func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configu
 	var batchSize int
 	var vnetHdr, udpGSO bool
 	if ifr.Uint16()&unix.IFF_VNET_HDR != 0 {
+		const (
+			// TODO: support TSO with ECN bits
+			tunTCPOffloads = unix.TUN_F_CSUM | unix.TUN_F_TSO4 | unix.TUN_F_TSO6
+			tunUDPOffloads = unix.TUN_F_USO4 | unix.TUN_F_USO6
+		)
+
 		// tunTCPOffloads were added in Linux v2.6. We require their support
 		// if IFF_VNET_HDR is set.
 		if err := unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, tunTCPOffloads); err != nil {
@@ -123,6 +139,7 @@ func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configu
 		}
 		vnetHdr = true
 		batchSize = DefaultBatchSize
+
 		// tunUDPOffloads were added in Linux v6.2. We do not return an
 		// error if they are unsupported at runtime.
 		udpGSO = unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, tunTCPOffloads|tunUDPOffloads) == nil
