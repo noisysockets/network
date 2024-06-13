@@ -11,7 +11,6 @@ package network
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/noisysockets/netutil/defaults"
 	"golang.org/x/sync/errgroup"
@@ -55,15 +54,11 @@ func copyPackets(ctx context.Context, dst, src Interface, packetWriteOffset int)
 		default:
 		}
 
-		fmt.Println("reading packets")
-
 		var err error
 		packets, err = src.Read(ctx, packets, packetWriteOffset)
 		if err != nil {
 			return err
 		}
-
-		fmt.Println("writing packets", len(packets))
 
 		if err := dst.Write(ctx, packets); err != nil {
 			return err
