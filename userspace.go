@@ -58,6 +58,9 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/icmp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
+	"github.com/noisysockets/netutil/addresses"
+	"github.com/noisysockets/netutil/multilistener"
+	"github.com/noisysockets/netutil/packetmux"
 	"github.com/noisysockets/netutil/triemap"
 	"github.com/noisysockets/network/internal/iptables/matcher"
 	"github.com/noisysockets/network/internal/iptables/target"
@@ -397,7 +400,6 @@ func (net *UserspaceNetwork) copyOutboundToNIC(offset int) error {
 	batchSize := net.nic.BatchSize()
 	packets := make([]*Packet, 0, batchSize)
 
-	// TODO: we could copy at a specific offset to make wireguards job a lot easier.
 	processPacket := func(stackPkt *stack.PacketBuffer) {
 		pkt := net.packetPool.Borrow()
 		view := stackPkt.ToView()
@@ -436,8 +438,7 @@ func (net *UserspaceNetwork) copyOutboundToNIC(offset int) error {
 					return nil
 				case stackPkt, ok := <-net.outbound:
 					if !ok {
-						_, err := net.nic.Write(net.tasksCtx, packets)
-						if err != nil {
+						if err := net.nic.Write(net.tasksCtx, packets); err != nil {
 							if !errors.Is(err, context.Canceled) {
 								net.logger.Error("Failed to write packets to NIC", slog.Any("error", err))
 							}
@@ -456,8 +457,7 @@ func (net *UserspaceNetwork) copyOutboundToNIC(offset int) error {
 			}
 
 		WRITE_BATCH:
-			_, err := net.nic.Write(net.tasksCtx, packets)
-			if err != nil {
+			if err := net.nic.Write(net.tasksCtx, packets); err != nil {
 				if !errors.Is(err, context.Canceled) {
 					net.logger.Error("Failed to write packets to NIC", slog.Any("error", err))
 				}
@@ -642,15 +642,33 @@ func (net *UserspaceNetwork) Listen(network, address string) (stdnet.Listener, e
 		return nil, opErr
 	}
 
-	addr, err := net.bindAddress("ip"+ipVersion, host)
+	addrs, err := net.bindAddresses("ip"+ipVersion, host)
 	if err != nil {
 		opErr.Err = err
 		return nil, opErr
 	}
 
-	fa, pn := convertToFullAddr(nicID, netip.AddrPortFrom(addr, uint16(port)))
+	var listeners []stdnet.Listener
+	var errs []error
 
-	return gonet.ListenTCP(net.stack, fa, pn)
+	for _, addr := range addrs {
+		fa, pn := convertToFullAddr(nicID, netip.AddrPortFrom(addr, uint16(port)))
+
+		lis, err := gonet.ListenTCP(net.stack, fa, pn)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		listeners = append(listeners, lis)
+	}
+
+	if len(listeners) == 0 {
+		opErr.Err = errors.Join(ErrNoSuitableAddress, errors.Join(errs...))
+		return nil, opErr
+	}
+
+	return multilistener.New(listeners...)
 }
 
 func (net *UserspaceNetwork) ListenPacket(network, address string) (stdnet.PacketConn, error) {
@@ -679,88 +697,86 @@ func (net *UserspaceNetwork) ListenPacket(network, address string) (stdnet.Packe
 		return nil, opErr
 	}
 
-	addr, err := net.bindAddress("ip"+ipVersion, host)
+	addrs, err := net.bindAddresses("ip"+ipVersion, host)
 	if err != nil {
 		opErr.Err = err
 		return nil, opErr
 	}
 
-	fa, pn := convertToFullAddr(nicID, netip.AddrPortFrom(addr, uint16(port)))
+	var pcs []stdnet.PacketConn
+	var errs []error
 
-	return gonet.DialUDP(net.stack, &fa, nil, pn)
+	for _, addr := range addrs {
+		fa, pn := convertToFullAddr(nicID, netip.AddrPortFrom(addr, uint16(port)))
+
+		pc, err := gonet.DialUDP(net.stack, &fa, nil, pn)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		pcs = append(pcs, pc)
+	}
+
+	if len(pcs) == 0 {
+		opErr.Err = errors.Join(ErrNoSuitableAddress, errors.Join(errs...))
+		return nil, opErr
+	}
+
+	return packetmux.New(pcs...)
 }
 
 func (net *UserspaceNetwork) Ping(ctx context.Context, network, host string) error {
 	return net.pinger.Ping(ctx, network, host)
 }
 
-// TODO: binding to both IPv4 and IPv6 / multiple addresses?
-func (net *UserspaceNetwork) bindAddress(network, host string) (addr netip.Addr, err error) {
+func (net *UserspaceNetwork) bindAddresses(network, host string) (addrs []netip.Addr, err error) {
 	allNICAddrs := net.stack.AllAddresses()[nicID]
 
-	if host != "" {
-		addrs, err := net.resolver.LookupNetIP(context.Background(), network, host)
+	if host != "" && !(host == "0.0.0.0" || host == "::") {
+		allAddrs, err := net.resolver.LookupNetIP(context.Background(), network, host)
 		if err != nil {
-			return addr, err
+			return allAddrs, err
 		}
 
 		// See if we find a matching address assigned to the NIC.
-		for _, addr := range addrs {
+		var addrs []netip.Addr
+		for _, addr := range allAddrs {
 			for _, nicAddr := range allNICAddrs {
 				if nicAddr.AddressWithPrefix.Address == util.TcpipAddrFrom(addr) {
-					return addr, nil
+					addrs = append(addrs, addr)
+					break
 				}
 			}
 		}
 
-		// If it's not a wildcard address, return an error.
-		if !addrs[0].IsUnspecified() {
-			return addr, ErrNoSuitableAddress
-		}
+		return addrs, ErrNoSuitableAddress
 	}
 
-	var hasV4, hasV6 bool
+	// Convert all nic addresses to netip addresses.
 	for _, nicAddr := range allNICAddrs {
 		addr, ok := netip.AddrFromSlice(nicAddr.AddressWithPrefix.Address.AsSlice())
 		if !ok {
 			continue
 		}
 
-		// Make sure not a broadcast/multicast address.
-		if (addr.Unmap().Is4() && addr.Unmap() == netip.AddrFrom4([4]byte{255, 255, 255, 255})) || addr.IsMulticast() {
-			continue
-		}
+		addrs = append(addrs, addr)
+	}
 
-		if addr.Unmap().Is4() {
-			hasV4 = true
-		} else if addr.Is6() {
-			hasV6 = true
+	// Filter broadcast and multicast addresses from the NIC addresses.
+	for i, addr := range addrs {
+		if (addr.Unmap().Is4() && addr.As4() == [4]byte{255, 255, 255, 255}) || addr.IsMulticast() {
+			addrs = append(addrs[:i], addrs[i+1:]...)
 		}
 	}
 
-	if (network == "ip4" && !hasV4) || (network == "ip6" && !hasV6) {
-		return addr, ErrNoSuitableAddress
+	// Filter the nic addresses based on the network.
+	addrs = addresses.FilterByNetwork(addrs, network)
+	if len(addrs) == 0 {
+		return addrs, ErrNoSuitableAddress
 	}
 
-	var pn tcpip.NetworkProtocolNumber
-	if hasV6 && network != "ip4" {
-		pn = ipv6.ProtocolNumber
-	} else {
-		pn = ipv4.ProtocolNumber
-	}
-
-	mainAddress, tcpipErr := net.stack.GetMainNICAddress(nicID, pn)
-	if tcpipErr != nil {
-		return addr, ErrNoSuitableAddress
-	}
-
-	var ok bool
-	addr, ok = netip.AddrFromSlice(mainAddress.Address.AsSlice())
-	if !ok {
-		return addr, ErrNoSuitableAddress
-	}
-
-	return addr, nil
+	return addrs, nil
 }
 
 // By default it is not possible to intercept and forward ICMP packets within netstack.

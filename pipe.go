@@ -162,7 +162,7 @@ func (p *pipeEndpoint) Read(ctx context.Context, packets []*Packet, offset int) 
 	return packets, nil
 }
 
-func (p *pipeEndpoint) Write(ctx context.Context, packets []*Packet) (n int, err error) {
+func (p *pipeEndpoint) Write(ctx context.Context, packets []*Packet) (err error) {
 	for i := range packets {
 		pkt := packets[i]
 
@@ -174,10 +174,9 @@ func (p *pipeEndpoint) Write(ctx context.Context, packets []*Packet) (n int, err
 		case <-ctx.Done():
 			pkt.Release()
 			packets[i] = nil
-			return 0, ctx.Err()
+			return ctx.Err()
 		case p.sendCh <- pkt:
 			// packet sent successfully
-			n++
 		}
 	}
 	return

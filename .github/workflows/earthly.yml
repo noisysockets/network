@@ -27,5 +27,5 @@ jobs:
 
     - name: Test
       run: |
-        earthly +test --GITHUB_ACTIONS=true
+        earthly -P +test --GITHUB_ACTIONS=true
         earthly +examples

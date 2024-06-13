@@ -37,7 +37,7 @@ func TestSplice(t *testing.T) {
 
 	ctx := context.Background()
 	go func() {
-		if err := network.Splice(ctx, nicB, nicC); err != nil && !errors.Is(err, os.ErrClosed) {
+		if err := network.Splice(ctx, nicB, nicC, nil); err != nil && !errors.Is(err, os.ErrClosed) {
 			panic(err)
 		}
 	}()
@@ -48,9 +48,8 @@ func TestSplice(t *testing.T) {
 		pkt.Size = copy(pkt.Buf[:], []byte("hello"))
 		t.Cleanup(pkt.Release)
 
-		n, err := nicA.Write(ctx, []*network.Packet{pkt})
+		err := nicA.Write(ctx, []*network.Packet{pkt})
 		require.NoError(t, err)
-		require.Equal(t, 1, n)
 
 		packets := make([]*network.Packet, 0, nicD.BatchSize())
 		packets, err = nicD.Read(ctx, packets, 0)
@@ -71,7 +70,7 @@ func TestSplice(t *testing.T) {
 		pkt.Size = copy(pkt.Buf[:], []byte("world"))
 		t.Cleanup(pkt.Release)
 
-		n, err := nicD.Write(ctx, []*network.Packet{pkt})
+		err := nicD.Write(ctx, []*network.Packet{pkt})
 		require.NoError(t, err)
 
 		packets := make([]*network.Packet, 0, nicA.BatchSize())
@@ -85,7 +84,5 @@ func TestSplice(t *testing.T) {
 			pkt.Release()
 			packets[i] = nil
 		}
-
-		require.Equal(t, 1, n)
 	}
 }

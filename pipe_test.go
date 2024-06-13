@@ -36,10 +36,8 @@ func TestPipe(t *testing.T) {
 	t.Cleanup(pkt.Release)
 
 	ctx := context.Background()
-	n, err := nicA.Write(ctx, []*network.Packet{pkt})
+	err := nicA.Write(ctx, []*network.Packet{pkt})
 	require.NoError(t, err)
-
-	require.Equal(t, 1, n)
 
 	{
 		packets := make([]*network.Packet, 0, nicB.BatchSize())
@@ -52,7 +50,6 @@ func TestPipe(t *testing.T) {
 			}
 		})
 
-		require.Equal(t, 1, n)
 		require.Equal(t, "hello", string(packets[0].Bytes()))
 	}
 
@@ -63,10 +60,8 @@ func TestPipe(t *testing.T) {
 	pkt.Size = copy(pkt.Buf[:], []byte("world"))
 	t.Cleanup(pkt.Release)
 
-	n, err = nicB.Write(ctx, []*network.Packet{pkt})
+	err = nicB.Write(ctx, []*network.Packet{pkt})
 	require.NoError(t, err)
-
-	require.Equal(t, 1, n)
 
 	{
 		packets := make([]*network.Packet, 0, nicA.BatchSize())
@@ -79,7 +74,6 @@ func TestPipe(t *testing.T) {
 			}
 		})
 
-		require.Equal(t, 1, n)
 		require.Equal(t, "world", string(packets[0].Bytes()))
 	}
 }

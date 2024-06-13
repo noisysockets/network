@@ -11,26 +11,40 @@ package network
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/noisysockets/netutil/defaults"
 	"golang.org/x/sync/errgroup"
 )
 
+type SpliceConfiguration struct {
+	// PacketWriteOffset is an optional hint to write outbound packet data at a
+	// specific offset inside the buffer. This is a performance hint for
+	// WireGuard (and other protocols that need to add their own headers).
+	PacketWriteOffset int
+}
+
 // Splice splices (bidirectional copy) two network interfaces together.
-func Splice(ctx context.Context, nicA, nicB Interface) error {
+func Splice(ctx context.Context, nicA, nicB Interface, conf *SpliceConfiguration) error {
+	conf, err := defaults.WithDefaults(conf, &SpliceConfiguration{})
+	if err != nil {
+		return err
+	}
+
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		return copyPackets(ctx, nicA, nicB)
+		return copyPackets(ctx, nicA, nicB, conf.PacketWriteOffset)
 	})
 
 	g.Go(func() error {
-		return copyPackets(ctx, nicB, nicA)
+		return copyPackets(ctx, nicB, nicA, conf.PacketWriteOffset)
 	})
 
 	return g.Wait()
 }
 
-func copyPackets(ctx context.Context, dst, src Interface) error {
+func copyPackets(ctx context.Context, dst, src Interface, packetWriteOffset int) error {
 	batchSize := dst.BatchSize()
 	packets := make([]*Packet, 0, batchSize)
 
@@ -41,27 +55,18 @@ func copyPackets(ctx context.Context, dst, src Interface) error {
 		default:
 		}
 
+		fmt.Println("reading packets")
+
 		var err error
-		packets, err = src.Read(ctx, packets, 0)
+		packets, err = src.Read(ctx, packets, packetWriteOffset)
 		if err != nil {
 			return err
 		}
 
-		for written := 0; written < len(packets); {
-			n, err := dst.Write(ctx, packets)
-			written += n
-			if n < len(packets) {
-				packets = packets[n:]
-			}
+		fmt.Println("writing packets", len(packets))
 
-			if err != nil {
-				for i, pkt := range packets {
-					pkt.Release()
-					packets[i] = nil
-				}
-
-				return err
-			}
+		if err := dst.Write(ctx, packets); err != nil {
+			return err
 		}
 
 		packets = packets[:0]

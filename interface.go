@@ -56,8 +56,7 @@ type Interface interface {
 	Read(ctx context.Context, packets []*Packet, offset int) ([]*Packet, error)
 
 	// Write one or more packets to the interface (without any additional headers).
-	// On a successful write it returns the number of packets written. Ownership
-	// of the packets is transferred to the interface and must not be accessed
-	// after a write operation.
-	Write(ctx context.Context, packets []*Packet) (int, error)
+	// Ownership of the packets is transferred to the interface and must not be
+	// accessed after a write operation.
+	Write(ctx context.Context, packets []*Packet) error
 }

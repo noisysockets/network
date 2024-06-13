@@ -69,9 +69,24 @@ func (net *UserspaceNetwork) newICMPPacketConn(network string) (stdnet.PacketCon
 		deadline: time.NewTimer(math.MaxInt64),
 	}
 
-	pc.localAddr, err = net.bindAddress(network, "")
+	addrs, err := net.bindAddresses(network, "")
 	if err != nil {
 		return nil, err
+	}
+
+	// If there is ipv6 address, use it.
+	var addressSet bool
+	for _, addr := range addrs {
+		if addr.Is6() {
+			addressSet = true
+			pc.localAddr = addr
+			break
+		}
+	}
+
+	if !addressSet {
+		// If there is no ipv6 address, use first ipv4 address.
+		pc.localAddr = addrs[0]
 	}
 
 	pn := header.IPv4ProtocolNumber

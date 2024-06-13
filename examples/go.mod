@@ -14,7 +14,7 @@ require (
 	github.com/miekg/dns v1.1.59 // indirect
 	github.com/noisysockets/contextio v0.4.0 // indirect
 	github.com/noisysockets/netstack v0.8.0 // indirect
-	github.com/noisysockets/netutil v0.7.0 // indirect
+	github.com/noisysockets/netutil v0.8.1 // indirect
 	github.com/noisysockets/pinger v0.4.2 // indirect
 	github.com/noisysockets/resolver v0.10.0 // indirect
 	github.com/vishvananda/netlink v1.1.0 // indirect

@@ -212,7 +212,7 @@ func (nic *Interface) Read(ctx context.Context, packets []*network.Packet, offse
 	}
 }
 
-func (nic *Interface) Write(ctx context.Context, packets []*network.Packet) (int, error) {
+func (nic *Interface) Write(ctx context.Context, packets []*network.Packet) error {
 	nic.writeOpMu.Lock()
 	defer func() {
 		nic.tcpGROTable.reset()
@@ -231,7 +231,7 @@ func (nic *Interface) Write(ctx context.Context, packets []*network.Packet) (int
 		var err error
 		nic.toWrite, err = nic.handleGRO(packets, nic.toWrite[:0])
 		if err != nil {
-			return 0, err
+			return err
 		}
 	} else {
 		nic.toWrite = nic.toWrite[:0]
@@ -240,41 +240,33 @@ func (nic *Interface) Write(ctx context.Context, packets []*network.Packet) (int
 		}
 	}
 
-	var total int
 	for _, pktIndex := range nic.toWrite {
 		pkt := packets[pktIndex]
 		buf := pkt.Bytes()
 
 	ATTEMPT_WRITE:
 		if err := nic.tunFile.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			return total, err
+			return err
 		}
 
-		n, err := nic.tunFile.Write(buf)
-		total += n
-
+		_, err := nic.tunFile.Write(buf)
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				select {
 				case <-ctx.Done():
-					return total, ctx.Err()
+					return ctx.Err()
 				default:
-					buf = buf[n:]
-					if len(buf) > 0 {
-						goto ATTEMPT_WRITE
-					} else {
-						continue
-					}
+					goto ATTEMPT_WRITE
 				}
 			} else if errors.Is(err, syscall.EBADFD) {
-				return total, os.ErrClosed
+				return os.ErrClosed
 			}
 
-			return total, err
+			return err
 		}
 	}
 
-	return total, nil
+	return nil
 }
 
 func (nic *Interface) MTU() int {
