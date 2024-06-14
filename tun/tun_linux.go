@@ -66,6 +66,8 @@ type Configuration struct {
 	// PacketPool is the pool from which packets are borrowed.
 	// If not specified, an unbounded pool will be created.
 	PacketPool *network.PacketPool
+	// TunFile is the optional file descriptor of an existing TUN device.
+	TunFile *os.File
 }
 
 // Interface is a TUN network interface implementation for linux.
@@ -95,12 +97,17 @@ func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configu
 		return nil, err
 	}
 
-	fd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, errors.New("TUN/TAP device not found (missing CONFIG_TUN)")
+	var fd int
+	if conf.TunFile != nil {
+		fd = int(conf.TunFile.Fd())
+	} else {
+		fd, err = unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, errors.New("TUN/TAP device not found (missing CONFIG_TUN)")
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 
 	if err := unix.SetNonblock(fd, true); err != nil {
