@@ -68,6 +68,10 @@ type Configuration struct {
 	PacketPool *network.PacketPool
 	// TunFile is the optional file descriptor of an existing TUN device.
 	TunFile *os.File
+	// Unmanaged is a flag to indicate if the TUN device is unmanaged
+	// eg. we are not responsible for setting the MTU or bringing the
+	// device up.
+	Unmanaged bool
 }
 
 // Interface is a TUN network interface implementation for linux.
@@ -154,17 +158,19 @@ func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configu
 		batchSize = 1
 	}
 
-	link, err := netlink.LinkByName(name)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find link %s: %w", name, err)
-	}
+	if !conf.Unmanaged {
+		link, err := netlink.LinkByName(name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find link %s: %w", name, err)
+		}
 
-	if err := netlink.LinkSetMTU(link, *conf.MTU); err != nil {
-		return nil, fmt.Errorf("failed to set MTU for %s: %w", name, err)
-	}
+		if err := netlink.LinkSetMTU(link, *conf.MTU); err != nil {
+			return nil, fmt.Errorf("failed to set MTU for %s: %w", name, err)
+		}
 
-	if err := netlink.LinkSetUp(link); err != nil {
-		return nil, fmt.Errorf("failed to set %s up: %w", name, err)
+		if err := netlink.LinkSetUp(link); err != nil {
+			return nil, fmt.Errorf("failed to set %s up: %w", name, err)
+		}
 	}
 
 	return &Interface{
