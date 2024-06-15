@@ -45,7 +45,8 @@ import (
 )
 
 const (
-	offset = VirtioNetHdrLen
+	defaultBatchSize = 128
+	offset           = VirtioNetHdrLen
 )
 
 var (
@@ -238,10 +239,10 @@ func FuzzHandleGRO(f *testing.F) {
 	f.Add(pkt0.Bytes(), pkt1.Bytes(), pkt2.Bytes(), pkt3.Bytes(), pkt4.Bytes(), pkt5.Bytes(), pkt6.Bytes(), pkt7.Bytes(), pkt8.Bytes(), pkt9.Bytes(), pkt10.Bytes(), pkt11.Bytes(), true, offset)
 	f.Fuzz(func(t *testing.T, pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11 []byte, canUDPGRO bool, offset int) {
 		nic := &Interface{
-			batchSize:   DefaultBatchSize,
+			batchSize:   defaultBatchSize,
 			udpGSO:      canUDPGRO,
-			tcpGROTable: newTCPGROTable(DefaultBatchSize),
-			udpGROTable: newUDPGROTable(DefaultBatchSize),
+			tcpGROTable: newTCPGROTable(defaultBatchSize),
+			udpGROTable: newUDPGROTable(defaultBatchSize),
 		}
 
 		pktBufs := [][]byte{pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11}
@@ -468,10 +469,10 @@ func TestHandleGRO(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nic := &Interface{
-				batchSize:   DefaultBatchSize,
+				batchSize:   defaultBatchSize,
 				udpGSO:      tt.canUDPGRO,
-				tcpGROTable: newTCPGROTable(DefaultBatchSize),
-				udpGROTable: newUDPGROTable(DefaultBatchSize),
+				tcpGROTable: newTCPGROTable(defaultBatchSize),
+				udpGROTable: newUDPGROTable(defaultBatchSize),
 			}
 
 			toWrite := make([]int, 0, len(tt.pktsIn))

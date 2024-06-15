@@ -152,6 +152,11 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 		},
 	}
 
+	mtu, err := nic.MTU()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get interface MTU: %w", err)
+	}
+
 	tasksCtx, tasksCancel := context.WithCancel(ctx)
 	tasks, tasksCtx := errgroup.WithContext(tasksCtx)
 
@@ -163,7 +168,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 		localPrefixes: localPrefixes,
 		resolver:      resolver.Literal(),
 		stack:         stack.New(stackOpts),
-		ep:            channel.New(outboundQueueSize, uint32(nic.MTU()), ""),
+		ep:            channel.New(outboundQueueSize, uint32(mtu), ""),
 		outbound:      make(chan *stack.PacketBuffer),
 		tasks:         tasks,
 		tasksCtx:      tasksCtx,
@@ -190,7 +195,7 @@ func Userspace(ctx context.Context, logger *slog.Logger, nic Interface, conf Use
 
 	var ep stack.LinkEndpoint = net.ep
 	if conf.PacketCaptureWriter != nil {
-		if snifferEP, err := sniffer.NewWithWriter(ep, conf.PacketCaptureWriter, uint32(nic.MTU())); err != nil {
+		if snifferEP, err := sniffer.NewWithWriter(ep, conf.PacketCaptureWriter, uint32(mtu)); err != nil {
 			_ = net.Close()
 			return nil, fmt.Errorf("failed to create pcap sniffer: %w", err)
 		} else {
@@ -340,9 +345,12 @@ func (net *UserspaceNetwork) copyInboundFromNIC() error {
 		net.tasksCancel()
 	}()
 
-	batchSize := net.nic.BatchSize()
-	mtu := net.nic.MTU()
+	mtu, err := net.nic.MTU()
+	if err != nil {
+		return fmt.Errorf("failed to get interface MTU: %w", err)
+	}
 
+	batchSize := net.nic.BatchSize()
 	packets := make([]*Packet, 0, batchSize)
 
 	net.logger.Debug("Started copying inbound packets")

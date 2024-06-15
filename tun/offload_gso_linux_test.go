@@ -109,14 +109,14 @@ func TestHandleGSO(t *testing.T) {
 	}
 
 	nic := &Interface{
-		batchSize:  DefaultBatchSize,
+		batchSize:  defaultBatchSize,
 		vnetHdr:    true,
 		packetPool: packetPool,
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := make([]*network.Packet, 0, DefaultBatchSize)
+			out := make([]*network.Packet, 0, defaultBatchSize)
 
 			_ = tt.hdr.encode(tt.pktIn.Buf[tt.pktIn.Offset-VirtioNetHdrLen:])
 			tt.pktIn.Offset -= VirtioNetHdrLen

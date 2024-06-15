@@ -40,8 +40,8 @@ import (
 type Interface interface {
 	io.Closer
 
-	// MTU returns the MTU of the interface.
-	MTU() int
+	// MTU returns the Maximum Transmission Unit of the interface.
+	MTU() (int, error)
 
 	// BatchSize returns the preferred/max number of packets that can be read or
 	// written in a single read/write call.
@@ -50,9 +50,9 @@ type Interface interface {
 	// Read one or more packets from the interface (without any additional headers).
 	// On a successful read it returns a slice of packets of up-to length batchSize.
 	// The caller is responsible for releasing the packets back to the pool. The
-	// caller can optionally supply an unallocated packet slice (eg. from a previous
-	// call to Read()) that will be used to store the read packets. This allows
-	// avoiding allocating the packet slice on each read.
+	// caller can optionally supply an unallocated packets slice (eg. from a
+	// previous call to Read()) that will be used to store the read packets.
+	// This allows avoiding allocating a new packets slice on each read.
 	Read(ctx context.Context, packets []*Packet, offset int) ([]*Packet, error)
 
 	// Write one or more packets to the interface (without any additional headers).

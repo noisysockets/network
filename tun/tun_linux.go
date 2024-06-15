@@ -51,26 +51,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const (
-	DefaultBatchSize = 128
-	DefaultMTU       = 1280
-)
-
 var _ network.Interface = (*Interface)(nil)
 
 // Configuration is the configuration for a TUN device.
 type Configuration struct {
+	// BatchSize is the number of packets to read in a single syscall.
+	// This is only used when the TUN device supports IFF_VNET_HDR.
+	BatchSize *int
 	// MTU is the maximum transmission unit of the TUN device.
 	// If MTU is nil, DefaultMTU is used.
 	MTU *int
 	// PacketPool is the pool from which packets are borrowed.
 	// If not specified, an unbounded pool will be created.
 	PacketPool *network.PacketPool
-	// TunFile is the optional file descriptor of an existing TUN device.
-	TunFile *os.File
+	// Fd is optionally the file descriptor of an existing TUN device.
+	Fd *int
 	// Unmanaged is a flag to indicate if the TUN device is unmanaged
 	// eg. we are not responsible for setting the MTU or bringing the
-	// device up.
+	// link up.
 	Unmanaged bool
 }
 
@@ -94,7 +92,8 @@ type Interface struct {
 // Create creates a new TUN device with the specified configuration.
 func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configuration) (network.Interface, error) {
 	conf, err := defaults.WithDefaults(conf, &Configuration{
-		MTU:        ptr.To(DefaultMTU),
+		BatchSize:  ptr.To(128),
+		MTU:        ptr.To(1280), // The minimum MTU for IPv6.
 		PacketPool: network.NewPacketPool(0, false),
 	})
 	if err != nil {
@@ -102,8 +101,8 @@ func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configu
 	}
 
 	var fd int
-	if conf.TunFile != nil {
-		fd = int(conf.TunFile.Fd())
+	if conf.Fd != nil {
+		fd = *conf.Fd
 	} else {
 		fd, err = unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
 		if err != nil {
@@ -114,13 +113,14 @@ func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configu
 		}
 	}
 
-	if err := unix.SetNonblock(fd, true); err != nil {
+	ifr, err := unix.NewIfreq(name)
+	if err != nil {
 		_ = unix.Close(fd)
 		return nil, err
 	}
 
-	ifr, err := unix.NewIfreq(name)
-	if err != nil {
+	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = unix.Close(fd)
 		return nil, err
 	}
 
@@ -146,17 +146,24 @@ func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configu
 		// if IFF_VNET_HDR is set.
 		if err := unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, tunTCPOffloads); err != nil {
 			_ = unix.Close(fd)
-			return nil, err
+			return nil, fmt.Errorf("failed to set offloads for %s: %w", name, err)
 		}
-		vnetHdr = true
-		batchSize = DefaultBatchSize
 
 		// tunUDPOffloads were added in Linux v6.2. We do not return an
 		// error if they are unsupported at runtime.
 		udpGSO = unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, tunTCPOffloads|tunUDPOffloads) == nil
+
+		vnetHdr = true
+		batchSize = *conf.BatchSize
 	} else {
 		batchSize = 1
 	}
+
+	logger.Debug("Created TUN interface",
+		slog.String("name", name),
+		slog.Bool("vnetHdr", vnetHdr),
+		slog.Bool("udpGSO", udpGSO),
+		slog.Int("batchSize", batchSize))
 
 	if !conf.Unmanaged {
 		link, err := netlink.LinkByName(name)
@@ -173,11 +180,15 @@ func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configu
 		}
 	}
 
+	// Note that the above -- open,ioctl,nonblock -- must happen prior to handing
+	// it to netpoll.
+	tunFile := os.NewFile(uintptr(fd), "/dev/net/tun")
+
 	return &Interface{
 		logger:      logger,
 		name:        name,
 		packetPool:  conf.PacketPool,
-		tunFile:     os.NewFile(uintptr(fd), "/dev/net/tun"),
+		tunFile:     tunFile,
 		batchSize:   batchSize,
 		vnetHdr:     vnetHdr,
 		udpGSO:      udpGSO,
@@ -299,15 +310,13 @@ func (nic *Interface) Write(ctx context.Context, packets []*network.Packet) erro
 	return nil
 }
 
-func (nic *Interface) MTU() int {
+func (nic *Interface) MTU() (int, error) {
 	link, err := netlink.LinkByName(nic.name)
 	if err != nil {
-		nic.logger.Warn("Failed to find link",
-			slog.Any("name", nic.name), slog.Any("error", err))
-		return DefaultMTU // Fallback to the minimal default MTU
+		return 0, fmt.Errorf("failed to find link: %w", err)
 	}
 
-	return link.Attrs().MTU
+	return link.Attrs().MTU, nil
 }
 
 func (nic *Interface) BatchSize() int {

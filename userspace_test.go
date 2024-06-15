@@ -165,6 +165,6 @@ type jumboNic struct {
 	network.Interface
 }
 
-func (j *jumboNic) MTU() int {
-	return 9000
+func (j *jumboNic) MTU() (int, error) {
+	return 9000, nil
 }

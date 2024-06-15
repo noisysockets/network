@@ -112,8 +112,8 @@ type pipeEndpoint struct {
 	sendCh      chan *Packet
 }
 
-func (p *pipeEndpoint) MTU() int {
-	return p.mtu
+func (p *pipeEndpoint) MTU() (int, error) {
+	return p.mtu, nil
 }
 
 func (p *pipeEndpoint) BatchSize() int {

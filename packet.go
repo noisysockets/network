@@ -9,10 +9,8 @@
 
 package network
 
-const (
-	// MaxPacketSize is the maximum size of an IP packet.
-	MaxPacketSize = 65535
-)
+// MaxPacketSize is the maximum size of an IP packet.
+const MaxPacketSize = 65535
 
 // Packet represents an IP packet.
 type Packet struct {
