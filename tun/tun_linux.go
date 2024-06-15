@@ -95,7 +95,7 @@ type Interface struct {
 func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configuration) (network.Interface, error) {
 	conf, err := defaults.WithDefaults(conf, &Configuration{
 		BatchSize:  ptr.To(128),
-		MTU:        ptr.To(1280), // The minimum MTU for IPv6.
+		MTU:        ptr.To(1500),
 		PacketPool: network.NewPacketPool(0, false),
 	})
 	if err != nil {
