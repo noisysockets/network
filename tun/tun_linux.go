@@ -76,17 +76,19 @@ type Configuration struct {
 type Interface struct {
 	logger      *slog.Logger
 	name        string
-	packetPool  *network.PacketPool
 	tunFile     *os.File
+	packetPool  *network.PacketPool
+	initalMTU   int
 	batchSize   int
 	vnetHdr     bool
 	udpGSO      bool
-	readOpMu    sync.Mutex                                    // readOpMu guards readBuff
-	vnetReadBuf [VirtioNetHdrLen + network.MaxPacketSize]byte // if vnetHdr every read() is prefixed by virtioNetHdr
-	writeOpMu   sync.Mutex                                    // writeOpMu guards toWrite, tcpGROTable
-	toWrite     []int
+	unmanaged   bool
+	readOpMu    sync.Mutex // readOpMu guards vnetReadBuf
+	vnetReadBuf [VirtioNetHdrLen + network.MaxPacketSize]byte
+	writeOpMu   sync.Mutex // writeOpMu guards toWrite, tcpGROTable, udpGROTable
 	tcpGROTable *tcpGROTable
 	udpGROTable *udpGROTable
+	toWrite     []int
 }
 
 // Create creates a new TUN device with the specified configuration.
@@ -187,11 +189,13 @@ func Create(ctx context.Context, logger *slog.Logger, name string, conf *Configu
 	return &Interface{
 		logger:      logger,
 		name:        name,
-		packetPool:  conf.PacketPool,
 		tunFile:     tunFile,
+		packetPool:  conf.PacketPool,
+		initalMTU:   *conf.MTU,
 		batchSize:   batchSize,
 		vnetHdr:     vnetHdr,
 		udpGSO:      udpGSO,
+		unmanaged:   conf.Unmanaged,
 		tcpGROTable: newTCPGROTable(batchSize),
 		udpGROTable: newUDPGROTable(batchSize),
 		toWrite:     make([]int, 0, batchSize),
@@ -311,6 +315,10 @@ func (nic *Interface) Write(ctx context.Context, packets []*network.Packet) erro
 }
 
 func (nic *Interface) MTU() (int, error) {
+	if nic.unmanaged {
+		return nic.initalMTU, nil
+	}
+
 	link, err := netlink.LinkByName(nic.name)
 	if err != nil {
 		return 0, fmt.Errorf("failed to find link: %w", err)
