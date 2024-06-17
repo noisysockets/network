@@ -13,7 +13,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/noisysockets/network/packetmux"
+	"github.com/noisysockets/network/internal/packetmux"
 	"github.com/stretchr/testify/require"
 )
 

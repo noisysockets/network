@@ -35,7 +35,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/noisysockets/network/multilistener"
+	"github.com/noisysockets/network/internal/multilistener"
 	"github.com/stretchr/testify/require"
 )
 
