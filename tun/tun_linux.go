@@ -59,7 +59,7 @@ type Configuration struct {
 	// This is only used when the TUN device supports IFF_VNET_HDR.
 	BatchSize *int
 	// MTU is the maximum transmission unit of the TUN device.
-	// If MTU is nil, DefaultMTU is used.
+	// If not specified, the default is 1500.
 	MTU *int
 	// PacketPool is the pool from which packets are borrowed.
 	// If not specified, an unbounded pool will be created.

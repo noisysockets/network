@@ -13,11 +13,9 @@ import (
 	"context"
 	stdnet "net"
 	"os"
-	"strings"
 
-	"github.com/miekg/dns"
-	"github.com/noisysockets/netutil/fqdn"
 	"github.com/noisysockets/pinger"
+	"github.com/noisysockets/resolver"
 )
 
 // Ensure that HostNetwork implements Network interface.
@@ -43,17 +41,7 @@ func (net *HostNetwork) Hostname() (string, error) {
 }
 
 func (net *HostNetwork) Domain() (string, error) {
-	hostname, err := net.Hostname()
-	if err != nil {
-		return "", err
-	}
-
-	fqdn, err := fqdn.FqdnHostname()
-	if err != nil {
-		return "", err
-	}
-
-	return dns.Fqdn(strings.TrimPrefix(fqdn, hostname+".")), nil
+	return resolver.Domain()
 }
 
 func (net *HostNetwork) InterfaceAddrs() ([]stdnet.Addr, error) {
