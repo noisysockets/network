@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/noisysockets/netutil/ptr"
+	"github.com/noisysockets/util/ptr"
 
 	"github.com/neilotoole/slogt"
 	"github.com/noisysockets/network"

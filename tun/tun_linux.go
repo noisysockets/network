@@ -44,9 +44,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/noisysockets/netutil/defaults"
-	"github.com/noisysockets/netutil/ptr"
 	"github.com/noisysockets/network"
+	"github.com/noisysockets/util/defaults"
+	"github.com/noisysockets/util/ptr"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )

@@ -14,8 +14,8 @@ import (
 
 	"github.com/noisysockets/netstack/pkg/tcpip/header"
 	"github.com/noisysockets/netstack/pkg/tcpip/stack"
-	"github.com/noisysockets/netutil/triemap"
 	"github.com/noisysockets/network/internal/util"
+	"github.com/noisysockets/util/triemap"
 )
 
 var _ stack.Matcher = (*destinationMatcher)(nil)

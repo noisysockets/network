@@ -15,7 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/noisysockets/netutil/waitpool"
+	"github.com/noisysockets/util/waitpool"
 )
 
 type PacketPool struct {

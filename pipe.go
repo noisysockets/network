@@ -14,8 +14,8 @@ import (
 	"os"
 	"sync/atomic"
 
-	"github.com/noisysockets/netutil/defaults"
-	"github.com/noisysockets/netutil/ptr"
+	"github.com/noisysockets/util/defaults"
+	"github.com/noisysockets/util/ptr"
 )
 
 // PipeConfiguration is the configuration for a pipe.

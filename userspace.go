@@ -58,16 +58,16 @@ import (
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/icmp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/tcp"
 	"github.com/noisysockets/netstack/pkg/tcpip/transport/udp"
-	"github.com/noisysockets/netutil/addresses"
-	"github.com/noisysockets/netutil/multilistener"
-	"github.com/noisysockets/netutil/packetmux"
-	"github.com/noisysockets/netutil/triemap"
 	"github.com/noisysockets/network/internal/iptables/matcher"
 	"github.com/noisysockets/network/internal/iptables/target"
 	"github.com/noisysockets/network/internal/protocol"
 	"github.com/noisysockets/network/internal/util"
+	"github.com/noisysockets/network/multilistener"
+	"github.com/noisysockets/network/packetmux"
 	"github.com/noisysockets/pinger"
 	"github.com/noisysockets/resolver"
+	"github.com/noisysockets/util/address"
+	"github.com/noisysockets/util/triemap"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -779,7 +779,7 @@ func (net *UserspaceNetwork) bindAddresses(network, host string) (addrs []netip.
 	}
 
 	// Filter the nic addresses based on the network.
-	addrs = addresses.FilterByNetwork(addrs, network)
+	addrs = address.FilterByNetwork(addrs, network)
 	if len(addrs) == 0 {
 		return addrs, ErrNoSuitableAddress
 	}

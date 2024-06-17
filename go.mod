@@ -1,15 +1,15 @@
 module github.com/noisysockets/network
 
-go 1.22.0
+go 1.22.4
 
 require (
 	github.com/miekg/dns v1.1.61
 	github.com/neilotoole/slogt v1.1.0
 	github.com/noisysockets/contextio v0.4.0
 	github.com/noisysockets/netstack v0.8.0
-	github.com/noisysockets/netutil v0.9.0
-	github.com/noisysockets/pinger v0.4.2
-	github.com/noisysockets/resolver v0.14.0
+	github.com/noisysockets/pinger v0.4.3
+	github.com/noisysockets/resolver v0.14.1
+	github.com/noisysockets/util v0.1.0
 	github.com/stretchr/testify v1.9.0
 	github.com/vishvananda/netlink v1.1.0
 	golang.org/x/sync v0.7.0

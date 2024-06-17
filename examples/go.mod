@@ -1,6 +1,6 @@
 module github.com/noisysockets/network/examples
 
-go 1.22.0
+go 1.22.4
 
 replace github.com/noisysockets/network => ../
 
@@ -14,9 +14,9 @@ require (
 	github.com/miekg/dns v1.1.61 // indirect
 	github.com/noisysockets/contextio v0.4.0 // indirect
 	github.com/noisysockets/netstack v0.8.0 // indirect
-	github.com/noisysockets/netutil v0.9.0 // indirect
-	github.com/noisysockets/pinger v0.4.2 // indirect
-	github.com/noisysockets/resolver v0.14.0 // indirect
+	github.com/noisysockets/pinger v0.4.3 // indirect
+	github.com/noisysockets/resolver v0.14.1 // indirect
+	github.com/noisysockets/util v0.1.0 // indirect
 	github.com/vishvananda/netlink v1.1.0 // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	golang.org/x/mod v0.18.0 // indirect

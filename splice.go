@@ -12,7 +12,7 @@ package network
 import (
 	"context"
 
-	"github.com/noisysockets/netutil/defaults"
+	"github.com/noisysockets/util/defaults"
 	"golang.org/x/sync/errgroup"
 )
 
